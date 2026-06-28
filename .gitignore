@@ -1,0 +1,103 @@
+# ============================================================================
+# DCN — Data Center Network Management Platform
+# ============================================================================
+# Guidelines:
+#   - Track only what is needed to build and run the project.
+#   - Secrets, credentials, and environment files MUST NOT be committed.
+#   - Generated artifacts, caches, and local tooling stay out of version control.
+# ============================================================================
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+wheels/
+*.whl
+.python-version
+
+# ── Virtual environments ────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+*.venv
+
+# ── Node.js / Frontend ──────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/.vite/
+
+# ── Top-level npm (Playwright / test tooling only — not part of the app) ────
+node_modules/
+package.json
+package-lock.json
+
+# ── Environment & secrets ───────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── IDE / Editor ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.dir-locals.el
+.project
+
+# ── OS files ────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ── Docker ──────────────────────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── Logs & runtime data ─────────────────────────────────────────────────────
+logs/
+data/
+*.log
+*.log.*
+
+# ── Database (local dev) ────────────────────────────────────────────────────
+backend/dcn.db
+backend/*.db
+*.db
+
+# ── Test & coverage ─────────────────────────────────────────────────────────
+.pytest_cache/
+backend/.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.coverage.*
+coverage.xml
+
+# ── Playwright / E2E ────────────────────────────────────────────────────────
+.playwright-cli/
+backend/.playwright-cli/
+frontend/.playwright-cli/
+screenshots/
+test-results/
+
+# ── Claude Code / AI tooling ────────────────────────────────────────────────
+.superpowers/
+.claude/
+
+# ── Code graph / analysis cache ─────────────────────────────────────────────
+.codegraph/
+
+# ── Backup files ─────────────────────────────────────────────────────────────
+*.bak
+*.tmp
+*.orig
+*~

@@ -1,0 +1,159 @@
+/* ============================================================
+   DCN Shared Utility Classes
+   Single source of truth for repeated UI patterns.
+   ============================================================ */
+
+/* ── Status Dots ── */
+.dcn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dcn-dot--online  { background: var(--dcn-dot-online); }
+.dcn-dot--offline { background: var(--dcn-dot-offline); }
+.dcn-dot--maintenance { background: var(--dcn-dot-maintenance); }
+.dcn-dot--online--glow {
+  background: var(--dcn-dot-online);
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+}
+.dcn-dot--sm {
+  width: 6px;
+  height: 6px;
+}
+
+/* ── Device Type Tags ── */
+.dcn-type-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--dcn-text-xs);
+  padding: 2px 6px;
+  border-radius: var(--dcn-radius-sm);
+  line-height: 1.4;
+}
+.dcn-type-tag--server   { background: var(--dcn-device-server-bg); color: var(--dcn-device-server); }
+.dcn-type-tag--switch   { background: var(--dcn-device-switch-bg); color: var(--dcn-device-switch); }
+.dcn-type-tag--router   { background: var(--dcn-device-router-bg); color: var(--dcn-device-router); }
+.dcn-type-tag--firewall { background: var(--dcn-device-firewall-bg); color: var(--dcn-device-firewall); }
+.dcn-type-tag--host     { background: var(--dcn-device-host-bg); color: var(--dcn-device-host); }
+
+/* ── Device Icon Backgrounds ── */
+.dcn-device-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--dcn-radius-md);
+}
+.dcn-device-icon--server   { background: var(--dcn-device-server-bg); color: var(--dcn-device-server); }
+.dcn-device-icon--switch   { background: var(--dcn-device-switch-bg); color: var(--dcn-device-switch); }
+.dcn-device-icon--router   { background: var(--dcn-device-router-bg); color: var(--dcn-device-router); }
+.dcn-device-icon--firewall { background: var(--dcn-device-firewall-bg); color: var(--dcn-device-firewall); }
+.dcn-device-icon--host     { background: var(--dcn-device-host-bg); color: var(--dcn-device-host); }
+
+/* ── Inline Panel (shared pattern for CredentialPanel, AuditPanel, etc.) ── */
+.dcn-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.dcn-panel__header {
+  padding: var(--dcn-space-4) var(--dcn-space-6);
+  border-bottom: 1px solid var(--dcn-border);
+  background: var(--dcn-bg-card);
+}
+.dcn-panel__title {
+  font-size: var(--dcn-text-xl);
+  font-weight: 600;
+  color: var(--dcn-text-primary);
+}
+.dcn-panel__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--dcn-space-5) var(--dcn-space-6);
+}
+
+/* ── Inline Panel (alternative naming, same layout) ── */
+.inline-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+.inline-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--dcn-space-4) var(--dcn-space-6);
+  border-bottom: 1px solid var(--dcn-border);
+  background: var(--dcn-bg-card);
+  flex-shrink: 0;
+}
+.inline-panel-title {
+  font-size: var(--dcn-text-xl);
+  font-weight: 600;
+  color: var(--dcn-text-primary);
+  margin: 0;
+}
+.inline-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--dcn-space-5) var(--dcn-space-6);
+}
+
+/* ── Section Title ── */
+.dcn-section-title {
+  font-size: var(--dcn-text-lg);
+  font-weight: 600;
+  color: var(--dcn-text-primary);
+  margin-bottom: var(--dcn-space-3);
+}
+
+/* ── Code Inline ── */
+.dcn-code {
+  background: var(--dcn-bg-section);
+  padding: 2px 6px;
+  border-radius: var(--dcn-radius-sm);
+  font-size: var(--dcn-text-base);
+  font-family: var(--dcn-font-mono);
+  color: var(--dcn-primary);
+}
+
+/* ── Card ── */
+.dcn-card {
+  background: var(--dcn-bg-card);
+  border: 1px solid var(--dcn-border);
+  border-radius: var(--dcn-radius-xl);
+  transition: all var(--dcn-transition-fast);
+}
+.dcn-card--hoverable:hover {
+  border-color: var(--dcn-border-strong);
+  background: var(--dcn-bg-muted);
+}
+
+/* ── Context Menu ── */
+.dcn-context-menu {
+  background: var(--dcn-bg-card);
+  border-radius: var(--dcn-radius-md);
+  box-shadow: var(--dcn-shadow-lg);
+  border: 1px solid var(--dcn-border);
+  padding: var(--dcn-space-1) 0;
+  min-width: 140px;
+  z-index: 3000;
+}
+.dcn-context-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--dcn-space-2);
+  padding: 8px 14px;
+  font-size: var(--dcn-text-md);
+  color: var(--dcn-text-regular);
+  cursor: pointer;
+  transition: all var(--dcn-transition-fast);
+}
+.dcn-context-menu__item:hover {
+  background: var(--dcn-primary-bg);
+  color: var(--dcn-primary);
+}
+.dcn-context-menu__item .el-icon {
+  font-size: var(--dcn-text-lg);
+}

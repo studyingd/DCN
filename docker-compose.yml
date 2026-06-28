@@ -1,0 +1,257 @@
+# ============================================================
+# DCN — Data Center Network Management Platform
+# Production Docker Compose
+# ============================================================
+# Quick start:
+#   1. Copy .env.example to .env and fill in required values
+#   2. docker compose up -d
+#   3. Open http://localhost:8080
+#
+# Services:
+#   frontend  — Nginx + Vue 3 SPA              (port 8080)
+#   backend   — Python FastAPI API server       (port 8002, internal)
+#   mysql     — MySQL 8.0 database              (port 3306)
+#   guacd     — Apache Guacamole RDP proxy      (port 4822)
+#   rustfs    — S3-compatible object storage    (port 19000/19001)
+# ============================================================
+
+services:
+  # ==========================================================
+  # MySQL Database
+  # ==========================================================
+  mysql:
+    image: mysql:8.0
+    container_name: dcn-mysql
+    networks:
+      - dcn-network
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-dcn}
+      MYSQL_CHARSET: utf8mb4
+      MYSQL_COLLATION: utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+
+  # ==========================================================
+  # Backend — FastAPI API Server
+  # ==========================================================
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: dcn-backend
+    networks:
+      - dcn-network
+    # Port bound to loopback for direct dev access only. In production the
+    # frontend nginx proxies /api and /ws to backend:8002 internally, so the
+    # backend should NOT be published to external interfaces (avoids bypassing
+    # nginx security headers / rate limits). Remove the mapping entirely in prod.
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8002}:8002"
+    environment:
+      # ── Required ──
+      DATABASE_URL: mysql+pymysql://root:${MYSQL_ROOT_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-dcn}
+      # ── Secrets ──
+      # Set via .env (gitignored). For stronger isolation, prefer Docker
+      # secrets: mount each secret to a file and set <NAME>_FILE instead — the
+      # backend reads ${NAME}_FILE first (see app/config.py). This keeps the
+      # value out of `docker inspect` / the process environment.
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set for production}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-24}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set for production}
+      CREDENTIAL_SECRET_KEY: ${CREDENTIAL_SECRET_KEY:?CREDENTIAL_SECRET_KEY must be set}
+      # ── Guacamole ──
+      GUACD_HOST: guacd
+      GUACD_PORT: "4822"
+      # ── Object Storage (credentials must be set explicitly — no insecure default) ──
+      MINIO_ENDPOINT: rustfs:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set}
+      MINIO_SECURE: "false"
+      MINIO_BUCKET_RECORDINGS: ${MINIO_BUCKET_RECORDINGS:-dcn-recordings}
+      MINIO_BUCKET_AUDIT: ${MINIO_BUCKET_AUDIT:-dcn-audit-logs}
+      # ── Monitoring ──
+      MONITOR_INTERVAL: ${MONITOR_INTERVAL:-30}
+      MONITOR_TIMEOUT: ${MONITOR_TIMEOUT:-2}
+      MONITOR_CONCURRENCY: ${MONITOR_CONCURRENCY:-20}
+      # ── Rate Limiting ──
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_STORAGE: ${RATE_LIMIT_STORAGE:-memory://}
+      # ── CORS ──
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      guacd:
+        condition: service_healthy
+      rustfs:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/api/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ==========================================================
+  # Frontend — Nginx + Vue 3 SPA
+  # ==========================================================
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: dcn-frontend
+    networks:
+      - dcn-network
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # ==========================================================
+  # guacd — Apache Guacamole RDP Proxy Daemon
+  # ==========================================================
+  guacd:
+    # Pinned to a concrete tag instead of :latest for reproducibility.
+    # Bump deliberately after testing compatibility.
+    image: guacamole/guacd:1.5.5
+    container_name: dcn-guacd
+    networks:
+      - dcn-network
+    cap_add:
+      - NET_ADMIN
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 4822 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # ==========================================================
+  # RustFS — S3-compatible Object Storage
+  # ==========================================================
+  rustfs:
+    # NOTE: pin to a concrete tag or @sha256:<digest> in production for
+    # reproducibility (avoid floating :latest).
+    image: rustfs/rustfs:latest
+    container_name: dcn-rustfs
+    networks:
+      - dcn-network
+    volumes:
+      - rustfs-data:/data
+      - rustfs-logs:/logs
+    environment:
+      RUSTFS_VOLUMES: /data
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+# ============================================================
+# Networks
+# ============================================================
+networks:
+  dcn-network:
+    driver: bridge
+    name: dcn-network
+
+# ============================================================
+# Persistent Volumes
+# ============================================================
+volumes:
+  mysql-data:
+    driver: local
+  rustfs-data:
+    driver: local
+  rustfs-logs:
+    driver: local

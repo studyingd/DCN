@@ -1,0 +1,32 @@
+# ruff configuration — Python linter for CI
+# FastAPI idiom note: B008 (Depends in defaults) and F821 (forward refs in
+# SQLAlchemy relationships) are intentional patterns, not bugs.
+target-version = "py312"
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes (unused imports, undefined names, etc.)
+    "W",   # pycodestyle warnings
+    "I",   # isort (import ordering)
+    "B",   # flake8-bugbear (common bug patterns)
+]
+ignore = [
+    "E501",  # line too long — leave to formatter
+    "E741",  # ambiguous variable name 'l' — too pervasive, low value
+    "B008",  # FastAPI Depends() in function defaults is idiomatic
+    "B904",  # raise from within except — too noisy for existing code
+]
+
+[lint.per-file-ignores]
+# SQLAlchemy forward references (relationship("ClassName")) are string-based
+"app/models/*.py" = ["F821"]
+# SQLAlchemy uses == None / != None to generate IS NULL / IS NOT NULL
+"app/routers/*.py" = ["E711"]
+"app/services/scheduler.py" = ["E711"]
+# Test files: unused variables in setup code, semicolon style in runners
+"test_*.py" = ["F841", "E702"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

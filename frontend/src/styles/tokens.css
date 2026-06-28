@@ -1,0 +1,388 @@
+/* ============================================================
+   DCN Design Tokens — Ongrid-inspired Dark Theme
+   Migrated from F:\Project\Ongrid zinc + purple palette.
+   All components must reference these variables, never hardcode.
+   ============================================================ */
+
+:root {
+  /* ── Page / Canvas ── */
+  --dcn-bg-page: #0b0b11;             /* near-zinc-950 + tiny purple cast */
+  --dcn-bg-section: #12121a;          /* slightly elevated section */
+  --dcn-bg-elevated: #16161e;         /* popovers, dropdowns */
+  --dcn-bg-card: #171721;             /* near-zinc-900 + purple cast — cards, sidebar */
+  --dcn-bg-muted: #1c1c28;            /* muted fill, hover states */
+  --dcn-bg-card-soft: rgba(23, 23, 32, 0.4);  /* translucent card fill */
+
+  /* ── Primary / Accent — Brand purple #8C6DF0 ── */
+  --dcn-primary: #8C6DF0;
+  --dcn-primary-light: #a58df5;
+  --dcn-primary-dark: #7356d9;
+  --dcn-primary-bg: rgba(140, 109, 240, 0.10);
+  --dcn-primary-bg-deep: rgba(140, 109, 240, 0.18);
+
+  /* ── Status / Semantic ── */
+  --dcn-success: #10b981;             /* emerald-500 */
+  --dcn-success-light: rgba(16, 185, 129, 0.10);
+  --dcn-success-dark: #059669;
+  --dcn-danger: #ef4444;              /* red-500 */
+  --dcn-danger-light: rgba(239, 68, 68, 0.10);
+  --dcn-danger-dark: #dc2626;
+  --dcn-warning: #f59e0b;             /* amber-500 */
+  --dcn-warning-light: rgba(245, 158, 11, 0.10);
+  --dcn-warning-dark: #d97706;
+  --dcn-info: #30a6d0;                /* cyan — Ongrid info token */
+
+  /* ── Text ── */
+  --dcn-text-primary: #f4f4f5;        /* zinc-100 */
+  --dcn-text-regular: #a1a1aa;        /* zinc-400 */
+  --dcn-text-secondary: #71717a;      /* zinc-500 */
+  --dcn-text-placeholder: #52525b;    /* zinc-600 */
+  --dcn-text-white: #ffffff;
+
+  /* ── Border ── */
+  --dcn-border: #282832;              /* near-zinc-800 + cool */
+  --dcn-border-strong: #3f3f50;       /* zinc-700 equivalent */
+  --dcn-border-light: #1e1e2a;
+  --dcn-border-soft: rgba(40, 40, 50, 0.6);
+
+  /* ── Radius Scale ── */
+  --dcn-radius-xs: 2px;
+  --dcn-radius-sm: 4px;
+  --dcn-radius-md: 6px;
+  --dcn-radius-lg: 8px;
+  --dcn-radius-xl: 12px;
+  --dcn-radius-2xl: 16px;
+  --dcn-radius-pill: 20px;
+  --dcn-radius-full: 50%;
+
+  /* ── Shadow Scale (dark-mode appropriate) ── */
+  --dcn-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --dcn-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --dcn-shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --dcn-shadow-xl: 0 12px 40px rgba(0, 0, 0, 0.6);
+
+  /* ── Spacing (base 4px) ── */
+  --dcn-space-1: 4px;
+  --dcn-space-2: 8px;
+  --dcn-space-3: 12px;
+  --dcn-space-4: 16px;
+  --dcn-space-5: 20px;
+  --dcn-space-6: 24px;
+  --dcn-space-8: 32px;
+  --dcn-space-10: 40px;
+
+  /* ── Typography ── */
+  --dcn-font-sans: 'Inter', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+  --dcn-font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', 'Fira Code', Menlo, Monaco, 'Courier New', monospace;
+
+  --dcn-text-xs: 11px;
+  --dcn-text-sm: 12px;
+  --dcn-text-base: 13px;
+  --dcn-text-md: 14px;
+  --dcn-text-lg: 16px;
+  --dcn-text-xl: 18px;
+  --dcn-text-2xl: 20px;
+  --dcn-text-3xl: 28px;
+
+  /* ── Layout ── */
+  --dcn-sidebar-width: 180px;
+  --dcn-sidebar-collapsed-width: 56px;
+  --dcn-detail-width: 320px;
+  --dcn-topbar-height: 52px;
+
+  /* ── Transition ── */
+  --dcn-transition-fast: 0.15s ease;
+  --dcn-transition-normal: 0.2s ease;
+  --dcn-transition-slow: 0.3s ease;
+
+  /* ── Topbar ── */
+  --dcn-topbar-bg: #171721;
+  --dcn-topbar-border: #282832;
+
+  /* ── Login Page ── */
+  --dcn-login-bg: #0b0b11;
+  --dcn-login-card-shadow: 0 24px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --dcn-login-btn-gradient: linear-gradient(135deg, #8C6DF0 0%, #5269F4 100%);
+
+  /* ── Sidebar ── */
+  --dcn-sidebar-active-bg: #27272a;   /* zinc-800 */
+  --dcn-sidebar-active-border: #8C6DF0;
+  --dcn-sidebar-hover-bg: rgba(39, 39, 42, 0.6);
+
+  /* ── Device Type Colors ── */
+  --dcn-device-server: #60a5fa;       /* blue-400 */
+  --dcn-device-server-bg: rgba(96, 165, 250, 0.10);
+  --dcn-device-switch: #a78bfa;       /* violet-400 */
+  --dcn-device-switch-bg: rgba(167, 139, 250, 0.10);
+  --dcn-device-router: #34d399;       /* emerald-400 */
+  --dcn-device-router-bg: rgba(52, 211, 153, 0.10);
+  --dcn-device-firewall: #fbbf24;     /* amber-400 */
+  --dcn-device-firewall-bg: rgba(251, 191, 36, 0.10);
+  --dcn-device-host: #a1a1aa;         /* zinc-400 */
+  --dcn-device-host-bg: rgba(161, 161, 170, 0.10);
+
+  /* ── Status Dot ── */
+  --dcn-dot-online: #10b981;          /* emerald-500 */
+  --dcn-dot-offline: #ef4444;         /* red-500 */
+  --dcn-dot-maintenance: #f59e0b;     /* amber-500 */
+}
+
+/* ============================================================
+   Element Plus Dark Mode Overrides
+   ============================================================ */
+
+:root {
+  /* Primary → Brand purple */
+  --el-color-primary: #8C6DF0;
+  --el-color-primary-light-3: #a58df5;
+  --el-color-primary-light-5: #bdacf8;
+  --el-color-primary-light-7: #d4ccfa;
+  --el-color-primary-light-8: #e2defc;
+  --el-color-primary-light-9: #f0eefd;
+  --el-color-primary-dark-2: #7356d9;
+
+  /* Backgrounds */
+  --el-bg-color: #171721;
+  --el-bg-color-page: #0b0b11;
+  --el-bg-color-overlay: #1c1c28;
+  --el-fill-color: #282832;
+  --el-fill-color-light: #1e1e2a;
+  --el-fill-color-lighter: #171721;
+  --el-fill-color-extra-light: #12121a;
+  --el-fill-color-blank: #171721;
+
+  /* Text */
+  --el-text-color-primary: #f4f4f5;
+  --el-text-color-regular: #a1a1aa;
+  --el-text-color-secondary: #71717a;
+  --el-text-color-placeholder: #52525b;
+  --el-text-color-disabled: #3f3f50;
+
+  /* Borders */
+  --el-border-color: #282832;
+  --el-border-color-light: #1e1e2a;
+  --el-border-color-lighter: #171721;
+  --el-border-color-extra-light: #12121a;
+
+  /* Mask */
+  --el-mask-color: rgba(0, 0, 0, 0.7);
+
+  /* Border radius */
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+  --el-border-radius-round: 20px;
+
+  /* Font family */
+  --el-font-family: 'Inter', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --el-font-family-monospace: 'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;
+
+  /* Transition */
+  --el-transition-duration: 0.2s;
+  --el-transition-duration-fast: 0.15s;
+
+  /* Box shadow */
+  --el-box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --el-box-shadow-light: 0 1px 4px rgba(0, 0, 0, 0.3);
+  --el-box-shadow-dark: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* ── EP Component Polish ── */
+
+.el-button--primary {
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  --el-button-bg-color: #8C6DF0;
+  --el-button-border-color: #8C6DF0;
+  --el-button-hover-bg-color: #a58df5;
+  --el-button-hover-border-color: #a58df5;
+  --el-button-active-bg-color: #7356d9;
+  --el-button-active-border-color: #7356d9;
+}
+
+.el-button--danger {
+  --el-button-bg-color: #ef4444;
+  --el-button-border-color: #ef4444;
+}
+
+.el-dialog {
+  border-radius: var(--dcn-radius-2xl) !important;
+  background-color: var(--dcn-bg-card) !important;
+  border: 1px solid var(--dcn-border) !important;
+  overflow: hidden;
+}
+.el-dialog__header {
+  border-bottom: 1px solid var(--dcn-border);
+  padding-bottom: 16px !important;
+}
+.el-dialog__title {
+  color: var(--dcn-text-primary);
+  font-weight: 600;
+}
+.el-dialog__body {
+  color: var(--dcn-text-regular);
+}
+.el-dialog__footer {
+  border-top: 1px solid var(--dcn-border);
+  padding-top: 16px !important;
+}
+
+.el-tabs__item {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dcn-text-regular);
+}
+.el-tabs__item.is-active {
+  font-weight: 600;
+  color: var(--dcn-primary);
+}
+.el-tabs__item:hover {
+  color: var(--dcn-text-primary);
+}
+
+.el-tag {
+  border-radius: var(--dcn-radius-sm);
+  font-weight: 500;
+}
+
+.el-input__wrapper {
+  border-radius: var(--dcn-radius-lg);
+  background-color: rgba(11, 11, 17, 0.4);
+  box-shadow: 0 0 0 1px var(--dcn-border) inset;
+  transition: all 0.2s ease;
+}
+.el-input__wrapper:hover {
+  box-shadow: 0 0 0 1px var(--dcn-border-strong) inset;
+}
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--dcn-border-strong) inset;
+}
+
+.el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: rgba(40, 40, 50, 0.3);
+  --el-table-row-hover-bg-color: rgba(39, 39, 42, 0.4);
+  --el-table-border-color: var(--dcn-border);
+  --el-table-text-color: var(--dcn-text-regular);
+  --el-table-header-text-color: var(--dcn-text-primary);
+}
+.el-table th.el-table__cell {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--dcn-text-primary);
+}
+
+.el-message {
+  border-radius: var(--dcn-radius-lg);
+}
+
+.el-form-item__label {
+  font-weight: 500;
+  color: var(--dcn-text-regular);
+}
+
+.el-popover.el-popper {
+  background-color: var(--dcn-bg-card) !important;
+  border: 1px solid var(--dcn-border) !important;
+}
+
+/* Dropdown Menu (el-dropdown) dark theme */
+.el-dropdown__popper {
+  background-color: var(--dcn-bg-card) !important;
+  border: 1px solid var(--dcn-border) !important;
+}
+.el-dropdown-menu {
+  background-color: transparent !important;
+  padding: 4px 0 !important;
+}
+.el-dropdown-menu__item {
+  color: var(--dcn-text-regular) !important;
+  padding: 8px 20px !important;
+}
+.el-dropdown-menu__item:not(.is-disabled):hover,
+.el-dropdown-menu__item:not(.is-disabled):focus {
+  background-color: var(--dcn-sidebar-hover-bg) !important;
+  color: var(--dcn-text-primary) !important;
+}
+.el-dropdown-menu__item.is-disabled {
+  color: var(--dcn-text-placeholder) !important;
+  cursor: default;
+}
+.el-dropdown__popper .el-popper__arrow::before {
+  background-color: var(--dcn-bg-card) !important;
+  border-color: var(--dcn-border) !important;
+}
+
+.el-select-dropdown {
+  background-color: var(--dcn-bg-card) !important;
+  border: 1px solid var(--dcn-border) !important;
+}
+.el-select-dropdown__item {
+  color: var(--dcn-text-regular);
+}
+.el-select-dropdown__item.hover,
+.el-select-dropdown__item:hover {
+  background-color: var(--dcn-sidebar-hover-bg);
+}
+.el-select-dropdown__item.selected {
+  color: var(--dcn-primary);
+}
+
+.el-card {
+  --el-card-bg-color: var(--dcn-bg-card);
+  border-color: var(--dcn-border);
+}
+
+.el-empty__description p {
+  color: var(--dcn-text-secondary);
+}
+
+/* ============================================================
+   Global Animations (Ongrid-style)
+   ============================================================ */
+
+@keyframes dcn-rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes dcn-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes dcn-scale-in {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+.dcn-anim-rise { animation: dcn-rise 240ms ease-out both; }
+.dcn-anim-fade { animation: dcn-fade-in 200ms ease-out both; }
+.dcn-anim-scale { animation: dcn-scale-in 180ms ease-out both; }
+
+/* ============================================================
+   Custom Scrollbars (Dark Theme)
+   ============================================================ */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(82, 82, 91, 0.4);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(113, 113, 122, 0.6);
+}
+
+/* ============================================================
+   Focus Ring
+   ============================================================ */
+
+*:focus-visible {
+  outline: 2px solid #3f3f50;
+  outline-offset: 2px;
+  border-radius: 6px;
+}

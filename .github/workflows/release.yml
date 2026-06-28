@@ -1,0 +1,184 @@
+name: Release (Build & Push Docker Images)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.12'
+  NODE_VERSION: '20'
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════
+  # Phase 1: Quality Gates — all checks must pass before release
+  # ═══════════════════════════════════════════════════════════════════
+  quality-gates:
+    name: Quality Gates
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: dcn_test_pass
+          MYSQL_DATABASE: dcn_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- Backend ---
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install backend dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install ruff pytest httpx
+
+      - name: Backend lint
+        run: ruff check backend/
+
+      - name: Init test database
+        working-directory: ./backend
+        env:
+          DATABASE_URL: mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test
+        run: |
+          python -c "
+          import os
+          os.environ.setdefault('DATABASE_URL', 'mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test')
+          from app.database import Base, engine
+          Base.metadata.create_all(bind=engine)
+          "
+
+      - name: Backend tests
+        working-directory: ./backend
+        env:
+          DATABASE_URL: mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test
+          JWT_SECRET: ci-test-jwt-secret
+          CREDENTIAL_SECRET_KEY: ci-test-credential-key-32bytes!!
+          MINIO_ACCESS_KEY: ci-test-minio-access-key
+          MINIO_SECRET_KEY: ci-test-minio-secret-key
+          ADMIN_USERNAME: admin
+          ADMIN_PASSWORD: ci-test-admin-password
+        run: python -m pytest . -v --tb=short
+
+      # --- Frontend ---
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Frontend type check
+        working-directory: ./frontend
+        run: npx vue-tsc --noEmit
+
+      - name: Frontend lint
+        working-directory: ./frontend
+        run: npx eslint src
+        continue-on-error: true
+
+      - name: Frontend build
+        working-directory: ./frontend
+        run: npm run build
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Phase 2: Build Docker images (if Dockerfiles exist)
+  # ═══════════════════════════════════════════════════════════════════
+  build-images:
+    name: Build Docker Images
+    needs: [quality-gates]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Backend image
+        if: hashFiles('docker/Dockerfile.backend') != ''
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.backend
+          push: false
+          load: true
+          tags: dcn-backend:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Frontend image
+        if: hashFiles('docker/Dockerfile.frontend') != ''
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.frontend
+          push: false
+          load: true
+          tags: dcn-frontend:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Phase 3: Create GitHub Release with auto-generated notes
+  # ═══════════════════════════════════════════════════════════════════
+  release-notes:
+    name: Create Release Notes
+    needs: [build-images]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate Release Notes
+        id: notes
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "## :rocket: DCN Release $VERSION" > release_notes.md
+          echo "" >> release_notes.md
+          echo "### :package: 镜像" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "| 组件 | 镜像 |" >> release_notes.md
+          echo "|------|------|" >> release_notes.md
+          echo "| Backend | \`dcn-backend:${VERSION}\` |" >> release_notes.md
+          echo "| Frontend | \`dcn-frontend:${VERSION}\` |" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### :memo: 变更记录" >> release_notes.md
+          echo "" >> release_notes.md
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            git log ${PREV_TAG}..HEAD --pretty=format:"* %s (%h)" --no-merges >> release_notes.md || true
+          else
+            git log -20 --pretty=format:"* %s (%h)" --no-merges >> release_notes.md || true
+          fi
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

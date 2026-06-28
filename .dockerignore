@@ -1,0 +1,64 @@
+# DCN — Docker context exclusions
+# Keep the build context small for faster builds and fewer cache invalidations.
+
+# Dependencies
+node_modules/
+backend/__pycache__/
+backend/app/__pycache__/
+backend/app/**/__pycache__/
+*.pyc
+
+# Build output
+dist/
+frontend/dist/
+
+# Environment (use docker-compose or --env-file to inject)
+.env
+.env.*
+!.env.example
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Logs
+logs/
+*.log
+
+# Data volumes (mounted at runtime)
+data/
+
+# Documentation & assets (not needed at runtime)
+docs/
+docs-assets/
+screenshots*.png
+*.md
+!README.md
+
+# CI/CD (not needed in image)
+.github/
+.claude/
+.playwright-cli/
+
+# Test files
+backend/test_*.py
+backend/.playwright-cli/
+frontend/.playwright-cli/
+
+# Development scripts
+deploy.*
+start.*
+stop.*
+docker-build-push.*

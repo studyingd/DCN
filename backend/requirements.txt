@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pyjwt
+passlib[bcrypt]
+bcrypt==4.0.1
+python-multipart
+paramiko
+slowapi
+python-dotenv
+cryptography
+alembic
+pydantic
+minio
