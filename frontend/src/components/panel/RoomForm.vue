@@ -1,17 +1,6 @@
 <template>
-  <el-dialog
-    :model-value="visible"
-    :title="isEdit ? '编辑机房' : '新建机房'"
-    width="600px"
-    @close="handleClose"
-  >
-    <el-form
-      ref="formRef"
-      :model="formData"
-      :rules="formRules"
-      label-width="100px"
-      label-position="right"
-    >
+  <el-dialog :model-value="visible" :title="isEdit ? '编辑机房' : '新建机房'" width="600px" @close="handleClose">
+    <el-form ref="formRef" :model="formData" :rules="formRules" label-width="100px" label-position="right">
       <el-form-item label="机房名称" prop="name">
         <el-input v-model="formData.name" placeholder="请输入机房名称" />
       </el-form-item>
@@ -21,12 +10,7 @@
       </el-form-item>
 
       <el-form-item label="描述" prop="description">
-        <el-input
-          v-model="formData.description"
-          type="textarea"
-          :rows="4"
-          placeholder="请输入机房描述"
-        />
+        <el-input v-model="formData.description" type="textarea" :rows="4" placeholder="请输入机房描述" />
       </el-form-item>
     </el-form>
 
@@ -55,7 +39,7 @@ const props = withDefaults(
   }>(),
   {
     room: null,
-  }
+  },
 )
 
 const emit = defineEmits<{
@@ -101,7 +85,7 @@ watch(
       }
       formRef.value?.clearValidate()
     }
-  }
+  },
 )
 
 function handleClose() {

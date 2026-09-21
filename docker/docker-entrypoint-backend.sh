@@ -14,11 +14,13 @@ for dir in /app/data /app/logs; do
     fi
 done
 
-# Apply DB migrations (Alembic) before serving traffic. Best-effort: on failure
-# the container still starts so the issue is visible in logs; the legacy
-# auto-create path remains available via DCN_AUTO_CREATE=true.
-gosu appuser python -m alembic upgrade head || \
-    echo "[entrypoint] WARNING: alembic upgrade head failed — check DATABASE_URL / migration status"
+# Apply DB migrations before serving traffic. A migration failure must fail fast;
+# serving an app against a partially upgraded schema is worse than restarting.
+gosu appuser python -m alembic upgrade head
+
+# Seed the built-in administrator role/account after the schema is ready.
+# The script is idempotent and leaves existing credentials unchanged.
+gosu appuser python init_db.py
 
 # Drop privileges and run the application (CMD)
 exec gosu appuser "$@"

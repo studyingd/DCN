@@ -1,17 +1,6 @@
 <template>
-  <el-dialog
-    :model-value="visible"
-    :title="isEdit ? '编辑机柜' : '新建机柜'"
-    width="600px"
-    @close="handleClose"
-  >
-    <el-form
-      ref="formRef"
-      :model="formData"
-      :rules="formRules"
-      label-width="100px"
-      label-position="right"
-    >
+  <el-dialog :model-value="visible" :title="isEdit ? '编辑机柜' : '新建机柜'" width="600px" @close="handleClose">
+    <el-form ref="formRef" :model="formData" :rules="formRules" label-width="100px" label-position="right">
       <el-form-item label="名称" prop="name">
         <el-input v-model="formData.name" placeholder="请输入机柜名称" />
       </el-form-item>
@@ -23,9 +12,13 @@
         </el-radio-group>
       </el-form-item>
 
-      <el-form-item v-if="formData.type === 'cabinet'" label="容量 (U)" prop="capacity_u">
-        <el-input-number v-model="formData.capacity_u" :min="1" :max="100" />
-      </el-form-item>
+      <el-alert
+        v-if="formData.type === 'cabinet'"
+        title="标准机柜固定为 24U，每台设备自动占用 2U"
+        type="info"
+        :closable="false"
+        show-icon
+      />
     </el-form>
 
     <template #footer>
@@ -52,7 +45,7 @@ const props = withDefaults(
   }>(),
   {
     rack: null,
-  }
+  },
 )
 
 const emit = defineEmits<{
@@ -74,7 +67,7 @@ interface FormData {
 const defaultFormData = (): FormData => ({
   name: '',
   type: 'cabinet',
-  capacity_u: 42,
+  capacity_u: 24,
 })
 
 const formData = reactive<FormData>(defaultFormData())
@@ -92,14 +85,14 @@ watch(
         Object.assign(formData, {
           name: props.rack.name,
           type: props.rack.type,
-          capacity_u: props.rack.capacity_u ?? 42,
+          capacity_u: 24,
         })
       } else {
         Object.assign(formData, defaultFormData())
       }
       formRef.value?.clearValidate()
     }
-  }
+  },
 )
 
 function handleClose() {
@@ -117,7 +110,7 @@ async function handleSubmit() {
     const payload: Partial<Rack> = {
       name: formData.name,
       type: formData.type,
-      capacity_u: formData.type === 'cabinet' ? formData.capacity_u : null,
+      capacity_u: formData.type === 'cabinet' ? 24 : null,
     }
 
     if (isEdit.value && props.rack) {

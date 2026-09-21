@@ -15,23 +15,10 @@ export const useRoomStore = defineStore('room', () => {
     loading.value = true
     const gen = ++_gen
     try {
-      const res = await roomAPI.list()
+      const res = await roomAPI.tree()
       if (gen !== _gen) return rooms.value
-      const flatRooms = res.data
-      // Enrich each room with full detail (nested racks + devices)
-      const detailed = await Promise.all(
-        flatRooms.map(async (room) => {
-          try {
-            const detail = await roomAPI.get(room.id)
-            return detail.data
-          } catch {
-            return room
-          }
-        })
-      )
-      if (gen !== _gen) return rooms.value
-      rooms.value = detailed
-      return detailed
+      rooms.value = res.data
+      return rooms.value
     } catch {
       if (gen === _gen) rooms.value = []
       return []

@@ -2,7 +2,12 @@
   <div class="rooms-panel">
     <div class="inline-panel-header">
       <h2 class="inline-panel-title">机房管理</h2>
-      <el-button v-if="authStore.hasPermission('device:manage')" type="primary" size="small" @click="showCreateDialog = true">
+      <el-button
+        v-if="authStore.hasPermission('device:manage')"
+        type="primary"
+        size="small"
+        @click="showCreateDialog = true"
+      >
         <el-icon><Plus /></el-icon>
         新建机房
       </el-button>
@@ -10,36 +15,30 @@
     <div class="rooms-panel-body">
       <el-empty v-if="rooms.length === 0" description="暂无机房，点击上方按钮新建" :image-size="60" />
       <div v-else class="room-grid">
-        <div v-for="room in rooms" :key="room.id" class="room-card" @click="emit('select-room', room)">
+        <button v-for="room in rooms" :key="room.id" type="button" class="room-card" @click="emit('select-room', room)">
           <div class="room-card-header">
-            <el-icon :size="22" style="color: var(--dcn-primary);"><OfficeBuilding /></el-icon>
+            <el-icon :size="22" style="color: var(--dcn-primary)"><OfficeBuilding /></el-icon>
             <span class="room-name">{{ room.name }}</span>
           </div>
           <div class="room-card-meta">
-            <span><el-icon><Coin /></el-icon> {{ room.rack_count ?? 0 }} 个机柜</span>
-            <span><el-icon><Monitor /></el-icon> {{ countDevices(room) }} 台设备</span>
+            <span
+              ><el-icon><Coin /></el-icon> {{ room.rack_count ?? 0 }} 个机柜</span
+            >
+            <span
+              ><el-icon><Monitor /></el-icon> {{ countDevices(room) }} 台设备</span
+            >
           </div>
           <div v-if="room.location" class="room-card-location">
             <el-icon><Location /></el-icon> {{ room.location }}
           </div>
           <div v-if="room.description" class="room-card-desc">{{ room.description }}</div>
-        </div>
+        </button>
       </div>
     </div>
 
     <!-- Create Room Dialog -->
-    <el-dialog
-      v-model="showCreateDialog"
-      title="新建机房"
-      width="460px"
-      :close-on-click-modal="false"
-    >
-      <el-form
-        ref="roomFormRef"
-        :model="roomForm"
-        :rules="roomRules"
-        label-width="80px"
-      >
+    <el-dialog v-model="showCreateDialog" title="新建机房" width="460px" :close-on-click-modal="false">
+      <el-form ref="roomFormRef" :model="roomForm" :rules="roomRules" label-width="80px">
         <el-form-item label="名称" prop="name">
           <el-input v-model="roomForm.name" placeholder="请输入机房名称" />
         </el-form-item>
@@ -47,12 +46,7 @@
           <el-input v-model="roomForm.location" placeholder="请输入机房位置" />
         </el-form-item>
         <el-form-item label="描述" prop="description">
-          <el-input
-            v-model="roomForm.description"
-            type="textarea"
-            :rows="3"
-            placeholder="请输入机房描述"
-          />
+          <el-input v-model="roomForm.description" type="textarea" :rows="3" placeholder="请输入机房描述" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -72,10 +66,10 @@ import { useRoomStore } from '@/stores/room'
 import { useAuthStore } from '@/stores/auth'
 import type { Room } from '@/types'
 
-const props = defineProps<{ rooms: Room[] }>()
+defineProps<{ rooms: Room[] }>()
 const emit = defineEmits<{
   'select-room': [room: Room]
-  'created': []
+  created: []
 }>()
 
 const roomStore = useRoomStore()
@@ -137,29 +131,21 @@ async function handleCreateRoom() {
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-}
-
-.inline-panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--dcn-space-4) var(--dcn-space-6);
-  border-bottom: 1px solid var(--dcn-border);
-  background: var(--dcn-bg-card);
-  flex-shrink: 0;
-}
-
-.inline-panel-title {
-  font-size: var(--dcn-text-xl);
-  font-weight: 600;
+  background: var(--dcn-bg-page);
   color: var(--dcn-text-primary);
-  margin: 0;
 }
+
+/* .inline-panel-header / .inline-panel-title 不再本地覆盖：
+   旧覆盖把标题从全局的 --dcn-text-2xl(20px) 缩到 --dcn-text-xl(18px)，
+   页头 padding 也从 12px 变成 16px 且丢了 min-height:64px，
+   导致机房管理的标题比其他页小、页头比其他页矮。
+   删掉后直接继承 utilities.css 的全局定义，与告警中心/系统设置/自动化运维一致。 */
 
 .rooms-panel-body {
   flex: 1;
   overflow-y: auto;
   padding: var(--dcn-space-5) var(--dcn-space-6);
+  background: var(--dcn-bg-page);
 }
 
 .room-grid {
@@ -169,6 +155,10 @@ async function handleCreateRoom() {
 }
 
 .room-card {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   padding: var(--dcn-space-5);
   background: var(--dcn-bg-card);
   border: 1px solid var(--dcn-border);

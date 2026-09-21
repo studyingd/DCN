@@ -9,14 +9,12 @@ class RoomCreate(BaseModel):
     name: str
     location: str | None = None
     description: str | None = None
-    floor_plan: dict | None = None
 
 
 class RoomUpdate(BaseModel):
     name: str | None = None
     location: str | None = None
     description: str | None = None
-    floor_plan: dict | None = None
 
 
 class RoomResponse(BaseModel):
@@ -26,7 +24,6 @@ class RoomResponse(BaseModel):
     name: str
     location: str | None = None
     description: str | None = None
-    floor_plan: dict | None = None
     created_at: datetime | None = None
     rack_count: int = 0
 
@@ -42,10 +39,6 @@ class RackBrief(BaseModel):
     room_id: int
     name: str
     type: str
-    position_x: float = 0
-    position_y: float = 0
-    position_z: float = 0
-    rotation: float = 0
     capacity_u: int | None = None
     devices: list["DeviceBrief"] = []
 

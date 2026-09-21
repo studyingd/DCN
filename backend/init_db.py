@@ -15,6 +15,16 @@ from pathlib import Path
 # 将项目根目录加入 sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# 先从项目根 .env 加载环境变量（与 app.config 行为一致），再判断是否需要
+# dev 默认值。否则 .env 中的 DATABASE_URL 会被下方的 dev 默认值“屏蔽”
+# （load_dotenv 默认不覆盖已存在的环境变量）。
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass  # python-dotenv 未安装时，依赖外部已设置的环境变量
+
 # Set required environment variables if not already set (for convenience in dev)
 if not os.getenv("DATABASE_URL"):
     os.environ["DATABASE_URL"] = (
@@ -24,7 +34,7 @@ if not os.getenv("DATABASE_URL"):
         "[WARNING] DATABASE_URL not set, using dev default. Set it explicitly for production."
     )
 
-from app.config import ADMIN_PASSWORD, ADMIN_USERNAME
+from app.config import ADMIN_PASSWORD, ADMIN_USERNAME, AUTO_CREATE_TABLES
 from app.database import Base, SessionLocal, engine
 from app.models import User  # noqa: F401 — 确保模型被导入以注册表
 from app.models.role import Role
@@ -53,9 +63,12 @@ def _ensure_admin_role(db) -> Role:
 
 
 def init_db():
-    # 创建所有表（开发/首次初始化）
-    Base.metadata.create_all(bind=engine)
-    print("数据库表已创建。")
+    # Schema is managed by Alembic in normal operation. Keep create_all only
+    # for explicitly enabled local development, so startup cannot silently
+    # bypass migrations or leave alembic_version inconsistent.
+    if AUTO_CREATE_TABLES:
+        Base.metadata.create_all(bind=engine)
+        print("数据库表已创建。")
 
     db = SessionLocal()
     try:

@@ -11,6 +11,7 @@ export const useAuthStore = defineStore('auth', () => {
   const permissions = ref<string[]>([])
   const deviceScope = ref<string>('all')
   const deviceIds = ref<number[]>([])
+  const pveGuests = ref<string[]>([])
   const jwtRole = ref<string>('')
   const isAdmin = ref<boolean>(false)
   const profileLoaded = ref<boolean>(false)
@@ -27,6 +28,7 @@ export const useAuthStore = defineStore('auth', () => {
     permissions.value = p.permissions || []
     deviceScope.value = p.device_scope || 'all'
     deviceIds.value = p.device_ids || []
+    pveGuests.value = p.pve_guests || []
     jwtRole.value = p.role || ''
     isAdmin.value = !!p.is_admin
     user.value = {
@@ -34,8 +36,11 @@ export const useAuthStore = defineStore('auth', () => {
       username: p.username,
       role: p.role,
       display_name: p.display_name,
-      is_active: true,
-    } as User
+      is_active: 1,
+      role_id: null,
+      role_name: p.role,
+      created_at: '',
+    }
     profileLoaded.value = true
   }
 
@@ -44,6 +49,7 @@ export const useAuthStore = defineStore('auth', () => {
     permissions.value = []
     deviceScope.value = 'all'
     deviceIds.value = []
+    pveGuests.value = []
     jwtRole.value = ''
     isAdmin.value = false
     profileLoaded.value = false
@@ -62,15 +68,13 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function login(username: string, password: string): Promise<boolean> {
-    try {
-      await authAPI.login({ username, password })
-      // Cookies are set; load the non-secret profile to drive the UI.
-      await fetchProfile()
-      return true
-    } catch {
-      _clear()
-      return false
+    await authAPI.login({ username, password })
+    // Cookies are set; load the non-secret profile to drive the UI.
+    const loaded = await fetchProfile()
+    if (!loaded) {
+      throw new Error('登录成功，但用户信息加载失败')
     }
+    return true
   }
 
   async function logout() {
@@ -98,6 +102,7 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     permissions,
     deviceScope,
+    pveGuests,
     deviceIds,
     isLoggedIn,
     userRole,

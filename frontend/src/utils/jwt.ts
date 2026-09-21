@@ -10,6 +10,7 @@ export interface JwtPayload {
   permissions?: string[]
   device_scope?: string
   device_ids?: number[]
+  pve_guests?: string[]
   exp?: number
   iat?: number
   type?: string
@@ -20,7 +21,10 @@ export interface JwtPayload {
 export function decodeJwtPayload(token: string): Record<string, unknown> {
   try {
     const base64 = token.split('.')[1]
-    const json = atob(base64.replace(/-/g, '+').replace(/_/g, '/'))
+    const bytes = Uint8Array.from(atob(base64.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0))
+    // atob yields a latin1 string; JWT payloads are UTF-8 bytes. Decode explicitly
+    // so non-ASCII claims (e.g. Chinese usernames) don't get mangled.
+    const json = new TextDecoder().decode(bytes)
     return JSON.parse(json) as Record<string, unknown>
   } catch {
     return {}

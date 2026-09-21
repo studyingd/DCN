@@ -5,9 +5,13 @@ export interface DashboardOverview {
   device_online: number
   device_offline: number
   device_maintenance: number
-  connection_count: number
   user_count: number
   online_user_count: number
+  pve_guest_total: number
+  pve_guest_running: number
+  pve_guest_stopped: number
+  pve_platform_count: number
+  alert_events_7d: number
 }
 
 export interface DeviceTypeItem {
@@ -28,35 +32,4 @@ export interface RoomSummaryItem {
   device_online: number
   device_offline: number
   device_maintenance: number
-}
-
-export interface TopologyNode {
-  id: number
-  name: string
-  type: string
-  ip: string | null
-  status: string
-  room_id: number | null
-  room_name: string | null
-}
-
-export interface TopologyEdge {
-  source: number
-  target: number
-  conn_type: string | null
-  bandwidth: string | null
-}
-
-export interface AuditEventItem {
-  id: number
-  event_type: string
-  username: string | null
-  device_name: string | null
-  command: string | null
-  created_at: string
-}
-
-export interface LoginTrendItem {
-  date: string
-  login_count: number
 }

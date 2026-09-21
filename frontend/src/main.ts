@@ -1,24 +1,21 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import ElementPlus from 'element-plus'
-import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
-import * as ElementPlusIconsVue from '@element-plus/icons-vue'
-import 'element-plus/dist/index.css'
+// Element Plus components need the dark CSS variable preset as well as the
+// project tokens; without it, table/drawer/description/date-picker surfaces
+// fall back to the library's light defaults.
+import 'element-plus/theme-chalk/dark/css-vars.css'
 import './styles/tokens.css'
 import './styles/utilities.css'
+import './styles/foundation.css'
+import 'element-plus/es/components/message/style/css'
+import 'element-plus/es/components/message-box/style/css'
 
 import App from './App.vue'
 import router from './router'
 
 const app = createApp(App)
 
-// Register Element Plus icons globally
-for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-  app.component(key, component)
-}
-
 app.use(createPinia())
-app.use(router)
-app.use(ElementPlus, { locale: zhCn })
 
+app.use(router)
 app.mount('#app')

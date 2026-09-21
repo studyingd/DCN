@@ -13,12 +13,12 @@ const props = defineProps<{
   distribution: DeviceTypeItem[]
 }>()
 
+// echarts 在 canvas 上渲染，读不到 CSS 变量，色值只能硬编码——
+// 必须与 src/styles/tokens.css 的 --dcn-device-* 保持一致，改动请同步两边。
 const TYPE_COLORS: Record<string, string> = {
-  server: '#5b9eff',
-  switch: '#00ccff',
-  router: '#00ff88',
-  firewall: '#ff9500',
-  host: '#a78bfa',
+  server: '#60a5fa',
+  cloud_server: '#22d3ee',
+  host: '#a1a1aa',
 }
 
 const chartOption = computed(() => {
@@ -26,7 +26,7 @@ const chartOption = computed(() => {
     name: item.label || item.type,
     value: item.count,
     itemStyle: {
-      color: TYPE_COLORS[item.type] || '#5b9eff',
+      color: TYPE_COLORS[item.type] || '#60a5fa',
     },
   }))
 
@@ -35,9 +35,9 @@ const chartOption = computed(() => {
   return {
     tooltip: {
       trigger: 'item',
-      backgroundColor: 'rgba(10, 14, 39, 0.9)',
-      borderColor: 'rgba(0, 170, 255, 0.3)',
-      textStyle: { color: '#e8edf5', fontSize: 13 },
+      backgroundColor: '#111827',
+      borderColor: '#223047',
+      textStyle: { color: '#f1f5f9', fontSize: 13 },
       formatter: (params: { name: string; value: number; percent: number }) => {
         return `${params.name}<br/>数量: <b>${params.value}</b><br/>占比: ${params.percent}%`
       },
@@ -46,7 +46,7 @@ const chartOption = computed(() => {
       orient: 'vertical',
       right: 10,
       top: 'center',
-      textStyle: { color: 'rgba(200, 215, 245, 0.7)', fontSize: 11 },
+      textStyle: { color: '#94a3b8', fontSize: 11 },
       itemWidth: 10,
       itemHeight: 10,
       itemGap: 8,
@@ -59,7 +59,7 @@ const chartOption = computed(() => {
         avoidLabelOverlap: false,
         label: { show: false },
         emphasis: {
-          label: { show: true, fontSize: 14, fontWeight: 'bold', color: '#e8edf5' },
+          label: { show: true, fontSize: 14, fontWeight: 'bold', color: '#f1f5f9' },
         },
         labelLine: { show: false },
         data,
@@ -73,7 +73,7 @@ const chartOption = computed(() => {
         style: {
           text: String(total),
           textAlign: 'center',
-          fill: '#e8edf5',
+          fill: '#f1f5f9',
           fontSize: 24,
           fontWeight: 'bold',
           fontFamily: 'Courier New',
@@ -86,7 +86,7 @@ const chartOption = computed(() => {
         style: {
           text: '设备总计',
           textAlign: 'center',
-          fill: 'rgba(200, 215, 245, 0.5)',
+          fill: '#64748b',
           fontSize: 11,
         },
       },

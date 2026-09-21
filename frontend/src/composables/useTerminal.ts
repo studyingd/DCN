@@ -54,10 +54,13 @@ export function useTerminal() {
     credentialId?: number
     width?: number
     height?: number
+    container?: string
     onOutput: (data: string) => void
     onError: (data: string) => void
     onConnected: (message: string) => void
     onDisconnected: () => void
+    ticket?: string
+    wsPath?: string
   }
 
   /**
@@ -79,10 +82,13 @@ export function useTerminal() {
       credentialId,
       width,
       height,
+      container,
       onOutput,
       onError,
       onConnected,
       onDisconnected,
+      ticket: providedTicket,
+      wsPath = `/ws/terminal/${deviceId}`,
     } = opts
 
     _onOutput = onOutput
@@ -94,18 +100,21 @@ export function useTerminal() {
     connectionInfo.value = null
 
     // Obtain a single-use ticket (cookie-auth). Server resolves credentials.
-    let ticket: string
+    let ticket: string = providedTicket || ''
     try {
-      const res = await terminalAPI.ticket({
-        device_id: deviceId,
-        conn_type: connType,
-        credential_id: credentialId ?? null,
-        username,
-        password,
-        width,
-        height,
-      })
-      ticket = res.data.ticket
+      if (!ticket) {
+        const res = await terminalAPI.ticket({
+          device_id: deviceId,
+          conn_type: connType,
+          credential_id: credentialId ?? null,
+          username,
+          password,
+          width,
+          height,
+          container,
+        })
+        ticket = res.data.ticket
+      }
     } catch (e: unknown) {
       const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       connectionError.value = detail || '获取终端票据失败'
@@ -116,7 +125,7 @@ export function useTerminal() {
 
     const base = _wsBaseUrl()
     const params = new URLSearchParams({ ticket })
-    const url = `${base}/ws/terminal/${deviceId}?${params.toString()}`
+    const url = `${base}${wsPath}?${params.toString()}`
 
     ws = new WebSocket(url)
 
@@ -169,6 +178,16 @@ export function useTerminal() {
   }
 
   /**
+   * Send a clipboard paste to the SSH session. It uses a dedicated message
+   * type so the xterm paste handler forwards the text exactly once.
+   */
+  function sendPaste(data: string): void {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'paste', data }))
+    }
+  }
+
+  /**
    * Send a terminal resize event to the backend.
    */
   function sendResize(cols: number, rows: number): void {
@@ -203,6 +222,7 @@ export function useTerminal() {
     connect,
     disconnect,
     sendInput,
+    sendPaste,
     sendResize,
   }
 }

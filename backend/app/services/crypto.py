@@ -32,5 +32,7 @@ def decrypt(ciphertext: str) -> str:
     try:
         return _FERNET.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
     except (InvalidToken, ValueError, TypeError) as exc:
-        logger.error("Failed to decrypt credential (key mismatch or corrupt data): %s", exc)
+        logger.error(
+            "Failed to decrypt credential (key mismatch or corrupt data): %s", exc
+        )
         return ""

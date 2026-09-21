@@ -17,19 +17,18 @@ const chartOption = computed(() => {
   const roomNames = props.rooms.map((r) => r.name)
   const onlineData = props.rooms.map((r) => r.device_online)
   const offlineData = props.rooms.map((r) => r.device_offline)
-  const maintenanceData = props.rooms.map((r) => r.device_maintenance)
 
   return {
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'shadow' },
-      backgroundColor: 'rgba(10, 14, 39, 0.9)',
-      borderColor: 'rgba(0, 170, 255, 0.3)',
-      textStyle: { color: '#e8edf5', fontSize: 12 },
+      backgroundColor: '#111827',
+      borderColor: '#223047',
+      textStyle: { color: '#f1f5f9', fontSize: 12 },
     },
     legend: {
-      data: ['在线', '离线', '维护中'],
-      textStyle: { color: 'rgba(200,215,245,0.65)', fontSize: 11 },
+      data: ['在线', '离线'],
+      textStyle: { color: '#94a3b8', fontSize: 11 },
       top: 0,
       itemWidth: 10,
       itemHeight: 10,
@@ -58,7 +57,7 @@ const chartOption = computed(() => {
         type: 'bar',
         stack: 'total',
         data: onlineData,
-        itemStyle: { color: '#00ff88', borderRadius: [0, 0, 0, 0] },
+        itemStyle: { color: '#22c55e', borderRadius: [0, 0, 0, 0] },
         barWidth: 14,
       },
       {
@@ -66,14 +65,7 @@ const chartOption = computed(() => {
         type: 'bar',
         stack: 'total',
         data: offlineData,
-        itemStyle: { color: '#ff4d6a', borderRadius: [0, 0, 0, 0] },
-      },
-      {
-        name: '维护中',
-        type: 'bar',
-        stack: 'total',
-        data: maintenanceData,
-        itemStyle: { color: '#ff9500', borderRadius: [0, 2, 2, 0] },
+        itemStyle: { color: '#f05252', borderRadius: [0, 0, 0, 0] },
       },
     ],
   }

@@ -1,0 +1,350 @@
+# ============================================================
+# DCN — Data Center Network Management Platform
+# Production Docker Compose
+# ============================================================
+# Quick start:
+#   1. Copy .env.example to .env and fill in required values
+#   2. docker compose -f docker/docker-compose.yml --env-file .env up -d
+#   3. Open http://localhost:8080
+#
+# Services:
+#   frontend  — Nginx + Vue 3 SPA              (port 8080)
+#   backend   — Python FastAPI API server       (port 8002, internal)
+#   mysql     — MySQL 8.0 database              (host port 3307)
+#   guacd     — Apache Guacamole RDP proxy      (host port 4822)
+# ============================================================
+
+services:
+  # ==========================================================
+  # MySQL Database
+  # ==========================================================
+  mysql:
+    image: mysql:8.0
+    container_name: ${COMPOSE_PROJECT_NAME:-dcn}-mysql
+    networks:
+      - dcn-network
+    ports:
+      # Host port is loopback-only and parameterised (MYSQL_PORT, default 3306);
+      # override it in .env when 3306 is already taken on the host. Containers
+      # still reach MySQL internally at mysql:3306 regardless of the host port.
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-dcn}
+      MYSQL_USER: ${MYSQL_USER:-dcn_app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-${MYSQL_ROOT_PASSWORD}}
+      MYSQL_CHARSET: utf8mb4
+      MYSQL_COLLATION: utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+      --innodb-buffer-pool-size=${MYSQL_INNODB_BUFFER_POOL_SIZE:-512M}
+      --slow-query-log=ON
+      --long-query-time=${MYSQL_LONG_QUERY_TIME:-1}
+      --innodb-flush-log-at-trx-commit=${MYSQL_FLUSH_LOG_AT_TRX_COMMIT:-2}
+      --sync-binlog=${MYSQL_SYNC_BINLOG:-100}
+
+  # ==========================================================
+  # Backend — FastAPI API Server
+  # ==========================================================
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: ${COMPOSE_PROJECT_NAME:-dcn}-backend
+    networks:
+      - dcn-network
+    # Port bound to loopback for direct dev access only. In production the
+    # frontend nginx proxies /api and /ws to backend:8002 internally, so the
+    # backend should NOT be published to external interfaces (avoids bypassing
+    # nginx security headers / rate limits). Remove the mapping entirely in prod.
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8002}:8002"
+    environment:
+      # ── Required ──
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcn_app}:${MYSQL_PASSWORD:-${MYSQL_ROOT_PASSWORD}}@mysql:3306/${MYSQL_DATABASE:-dcn}?charset=utf8mb4
+      # ── Secrets ──
+      # Set via .env (gitignored). For stronger isolation, prefer Docker
+      # secrets: mount each secret to a file and set <NAME>_FILE instead — the
+      # backend reads ${NAME}_FILE first (see app/config.py). This keeps the
+      # value out of `docker inspect` / the process environment.
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set for production}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-24}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set for production}
+      CREDENTIAL_SECRET_KEY: ${CREDENTIAL_SECRET_KEY:?CREDENTIAL_SECRET_KEY must be set}
+      # ── Guacamole ──
+      GUACD_HOST: guacd
+      GUACD_PORT: "4822"
+      # ── Monitoring ──
+      MONITOR_INTERVAL: ${MONITOR_INTERVAL:-30}
+      MONITOR_TIMEOUT: ${MONITOR_TIMEOUT:-2}
+      MONITOR_CONCURRENCY: ${MONITOR_CONCURRENCY:-20}
+      # ── Rate Limiting ──
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_STORAGE: ${RATE_LIMIT_STORAGE:-redis://redis:6379/0}
+      # uvicorn 只信任这里列出的地址发来的 X-Forwarded-For（默认仅 127.0.0.1）。
+      # nginx 从 dcn-network 内网连过来，不在白名单里的话 XFF 会被整段忽略，
+      # 所有客户端共用 nginx 的容器 IP —— 按 IP 的限流/审计会退化成「全站一个桶」，
+      # 登录限流变成全公司共享 30 次。这里默认信任 compose 网段 + 本机回环。
+      # 若把 backend 端口发布到外网，务必收紧该值，否则客户端可伪造 XFF 绕过限流。
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-${DCN_NETWORK_SUBNET:-172.28.0.0/16},127.0.0.1}
+      WS_TICKET_STORAGE: ${WS_TICKET_STORAGE:-redis://redis:6379/0}
+      BACKGROUND_TASKS_ENABLED: ${BACKGROUND_TASKS_ENABLED:-true}
+      # ── 通知文案时区 ──
+      # DB 存 UTC，飞书卡片/多维表格里的时间按此时区渲染（容器默认 TZ 是 UTC）。
+      DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Asia/Shanghai}
+      # ── CORS ──
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
+      # ── 应用日志 ──
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # ── Guacamole RDP 通道 ──
+      GUACD_USE_RELAY: ${GUACD_USE_RELAY:-false}
+      GUAC_RDP_SECURITY: ${GUAC_RDP_SECURITY:-any}
+      GUAC_RDP_IGNORE_CERT: ${GUAC_RDP_IGNORE_CERT:-false}
+      GUAC_RDP_COLOR_DEPTH: ${GUAC_RDP_COLOR_DEPTH:-8}
+      # ── WinRM（Windows 设备管理通道）──
+      WINRM_ENABLED: ${WINRM_ENABLED:-true}
+      WINRM_PORT: ${WINRM_PORT:-5985}
+      WINRM_USE_SSL: ${WINRM_USE_SSL:-false}
+      WINRM_CERT_VALIDATION: ${WINRM_CERT_VALIDATION:-true}
+      # ── 服务器指标采集 ──
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_INTERVAL: ${METRICS_INTERVAL:-60}
+      METRICS_CONCURRENCY: ${METRICS_CONCURRENCY:-10}
+      METRICS_TIMEOUT: ${METRICS_TIMEOUT:-15}
+      METRICS_RETENTION_DAYS: ${METRICS_RETENTION_DAYS:-7}
+      # ── PVE 虚机状态快照 ──
+      PVE_STATUS_ENABLED: ${PVE_STATUS_ENABLED:-true}
+      PVE_STATUS_INTERVAL: ${PVE_STATUS_INTERVAL:-30}
+      PVE_STATUS_TIMEOUT: ${PVE_STATUS_TIMEOUT:-6}
+      # ── 业务监控：接口 HTTP 探测 ──
+      INTERFACE_PROBE_ENABLED: ${INTERFACE_PROBE_ENABLED:-true}
+      INTERFACE_PROBE_INTERVAL: ${INTERFACE_PROBE_INTERVAL:-60}
+      INTERFACE_PROBE_CONCURRENCY: ${INTERFACE_PROBE_CONCURRENCY:-10}
+      # ── Docker 容器管理 ──
+      CONTAINERS_ENABLED: ${CONTAINERS_ENABLED:-true}
+      CONTAINERS_INTERVAL: ${CONTAINERS_INTERVAL:-60}
+      CONTAINERS_CONCURRENCY: ${CONTAINERS_CONCURRENCY:-10}
+      CONTAINERS_TIMEOUT: ${CONTAINERS_TIMEOUT:-25}
+      # ── Agent 诊断（LLM 只读排障）──
+      # 这里必须转发，否则容器内 AGENT_ENABLED 永远是默认 false、LLM 网关也拿不到
+      # key —— .env 里配了也不生效，AI 归因分析会一直「未得出结果」。
+      AGENT_ENABLED: ${AGENT_ENABLED:-false}
+      AGENT_LLM_BASE_URL: ${AGENT_LLM_BASE_URL:-}
+      AGENT_LLM_API_KEY: ${AGENT_LLM_API_KEY:-}
+      AGENT_LLM_MODEL: ${AGENT_LLM_MODEL:-}
+      AGENT_LLM_TIMEOUT: ${AGENT_LLM_TIMEOUT:-60}
+      # Agent 循环单次 LLM 调用超时(默认 180s):推理型模型生成 3000+ token
+      # 的最终报告实测 55~60s,60s 贴线跑会把采完 22 步证据的诊断整个作废。
+      # 未单独设置时回落 AGENT_LLM_TIMEOUT(兼容旧部署)。
+      AGENT_LLM_REPORT_TIMEOUT: ${AGENT_LLM_REPORT_TIMEOUT:-${AGENT_LLM_TIMEOUT:-180}}
+      AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-8}
+      AGENT_CMD_TIMEOUT: ${AGENT_CMD_TIMEOUT:-20}
+      AGENT_MAX_OUTPUT_CHARS: ${AGENT_MAX_OUTPUT_CHARS:-6000}
+      # ── 告警自愈 + 指标过高 AI 归因 ──
+      ALERT_AUTO_REMEDIATION: ${ALERT_AUTO_REMEDIATION:-true}
+      ALERT_AUTO_ANALYSIS: ${ALERT_AUTO_ANALYSIS:-true}
+      ALERT_REMEDIATION_MAX_ATTEMPTS: ${ALERT_REMEDIATION_MAX_ATTEMPTS:-2}
+      ALERT_REMEDIATION_COOLDOWN_SECONDS: ${ALERT_REMEDIATION_COOLDOWN_SECONDS:-600}
+      ALERT_REMEDIATION_VERIFY_SECONDS: ${ALERT_REMEDIATION_VERIFY_SECONDS:-90}
+      ALERT_ANALYSIS_SUSTAIN_SECONDS: ${ALERT_ANALYSIS_SUSTAIN_SECONDS:-180}
+      ALERT_ANALYSIS_WAIT_SECONDS: ${ALERT_ANALYSIS_WAIT_SECONDS:-300}
+      # true = 扣住 alert.created，等 AI 归因结论出来后连同结论一起发（一条消息里
+      # 就带归因结果）；HOLD_TIMEOUT 是看门狗上限，防止归因卡死把告警吞掉。
+      ALERT_ANALYSIS_HOLD_NOTIFICATION: ${ALERT_ANALYSIS_HOLD_NOTIFICATION:-true}
+      ALERT_ANALYSIS_HOLD_TIMEOUT_SECONDS: ${ALERT_ANALYSIS_HOLD_TIMEOUT_SECONDS:-180}
+      # ── 建表开关 ──
+      # 生产必须 false，用 alembic upgrade head 管理表结构。
+      DCN_AUTO_CREATE: ${DCN_AUTO_CREATE:-false}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      guacd:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/api/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ==========================================================
+  # Frontend — Nginx + Vue 3 SPA
+  # ==========================================================
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+      args:
+        # 构建期注入，默认跟随 BACKEND_PORT；单独设 VITE_WS_PORT 可覆盖。
+        VITE_WS_PORT: ${VITE_WS_PORT:-${BACKEND_PORT:-8002}}
+    container_name: ${COMPOSE_PROJECT_NAME:-dcn}-frontend
+    networks:
+      - dcn-network
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    restart: unless-stopped
+    healthcheck:
+      # nginx.conf listens on IPv4 only (`listen 80;`), while busybox wget
+      # resolves `localhost` to ::1 first — probe 127.0.0.1 explicitly.
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # ==========================================================
+  # Redis — shared rate-limit and WebSocket ticket state
+  # ==========================================================
+  redis:
+    image: redis:7.4-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-dcn}-redis
+    networks:
+      - dcn-network
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================
+  # Initialize GuacamoleFS volume ownership, then run guacd unprivileged.
+  guacd-init:
+    image: alpine:3.22
+    command: ["sh", "-c", "chown -R 1000:1000 /drives"]
+    volumes:
+      - guacd-drives:/drives
+    restart: "no"
+
+  # guacd — Apache Guacamole RDP Proxy Daemon
+  # ==========================================================
+  guacd:
+    # Pinned to a concrete tag instead of :latest for reproducibility.
+    # Bump deliberately after testing compatibility.
+    image: guacamole/guacd:1.5.5
+    container_name: ${COMPOSE_PROJECT_NAME:-dcn}-guacd
+    networks:
+      - dcn-network
+    # Expose guacd on the host loopback so a locally-running (non-Docker)
+    # backend can reach it during local development. Not needed when the
+    # backend itself runs in Docker (uses the internal network). Loopback-only.
+    ports:
+      - "127.0.0.1:${GUACD_PORT:-4822}:4822"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Keep guacd on the image's unprivileged user. The named volume is writable
+    # by the image entrypoint and is shared with the backend only for cleanup.
+    user: "1000:1000"
+    depends_on:
+      guacd-init:
+        condition: service_completed_successfully
+    volumes:
+      - guacd-drives:/var/guacd/drives
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 4822 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+# ============================================================
+# Networks
+# ============================================================
+networks:
+  dcn-network:
+    driver: bridge
+    name: dcn-network
+    # 固定网段，backend 的 FORWARDED_ALLOW_IPS 才有稳定的值可信任（否则每次
+    # 重建网络都可能换网段）。与宿主机已有网络冲突时用 .env 里的
+    # DCN_NETWORK_SUBNET 覆盖。改动网段需要 docker compose down 后重建网络。
+    ipam:
+      config:
+        - subnet: ${DCN_NETWORK_SUBNET:-172.28.0.0/16}
+
+# ============================================================
+# Persistent Volumes
+# ============================================================
+volumes:
+  mysql-data:
+    driver: local
+  redis-data:
+    driver: local
+  guacd-drives:
+    driver: local

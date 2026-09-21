@@ -7,6 +7,11 @@ Each parser returns: { success, value, unit, status, details }
 import logging
 import re
 
+from app.services.inspection_commands import (
+    SCM_FAILURE_EVENT_IDS,
+    WINDOWS_SERVICE_FAILURE_WINDOW_HOURS,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Thresholds ──
@@ -15,7 +20,6 @@ THRESHOLDS: dict[str, dict[str, float]] = {
     "cpu": {"warning": 70, "critical": 85},
     "memory": {"warning": 75, "critical": 90},
     "disk": {"warning": 80, "critical": 95},
-    "interface_down_pct": {"warning": 30, "critical": 50},
     "failed_services": {"warning": 1, "critical": 3},
 }
 
@@ -38,17 +42,6 @@ def parse_item(item_type: str, raw_output: str, target_type: str) -> dict:
         "cpu": _parse_cpu,
         "memory": _parse_memory,
         "disk": _parse_disk,
-        "interface": _parse_interface,
-        "version": _parse_version,
-        "routes": _parse_routes,
-        "log": _parse_log,
-        "environment": _parse_environment,
-        "power": _parse_power,
-        "fan": _parse_fan,
-        "stp": _parse_stp,
-        "vlan": _parse_vlan,
-        "arp": _parse_arp,
-        "mac": _parse_mac,
         "load": _parse_load,
         "network": _parse_network,
         "ports": _parse_ports,
@@ -107,19 +100,19 @@ def _parse_cpu(raw: str, target_type: str) -> dict:
     usage = None
 
     if target_type == "linux":
-        # top -bn1 | head -5 → "%Cpu(s):  5.2 us,  1.3 sy, ..."
-        m = re.search(r"%Cpu\(s\):\s+([\d.]+)\s+us", raw)
+        # top -bn1 → "%Cpu(s):  5.2 us,  1.3 sy,  0.0 ni, 92.9 id, ..."
+        # 中文 locale 下冒号是全角「：」。只取 us 会把内核态(sy)与 IO 等待(wa)
+        # 饱和误判成空闲;取 idle 的补集。
+        m = re.search(r"%Cpu\(s\)[:：].*?([\d.]+)\s+id\b", raw)
         if m:
-            usage = float(m.group(1))
+            usage = round(max(0.0, min(100.0, 100.0 - float(m.group(1)))), 1)
+        else:
+            m = re.search(r"%Cpu\(s\)[:：]\s+([\d.]+)\s+us", raw)
+            if m:
+                usage = float(m.group(1))
 
     elif target_type == "windows":
         usage = _last_percent(raw)
-
-    else:  # network
-        # Huawei/H3C: "CPU Usage : 15%" or "cpu-usage : 15%"
-        m = re.search(r"(\d+)\s*%", raw)
-        if m:
-            usage = float(m.group(1))
 
     if usage is None:
         return {
@@ -146,26 +139,28 @@ def _parse_memory(raw: str, target_type: str) -> dict:
     details: dict = {}
 
     if target_type == "linux":
-        # free -m → "Mem:  16384  12288   4096  ..."
-        lines = raw.strip().splitlines()
-        for line in lines:
-            if line.startswith("Mem:"):
-                parts = line.split()
-                if len(parts) >= 3:
-                    total = float(parts[1])
-                    used = float(parts[2])
-                    usage = (used / total * 100) if total > 0 else 0
-                    details = {"total_mb": int(total), "used_mb": int(used)}
-                    break
+        # free -m → "Mem:  16384  12288   4096  ..."；中文 locale 下行标签是
+        # 「内存：」（表头行仍是英文，procps 只翻译行标签）。不能只认 "Mem:"
+        # 前缀——按「首个带 ≥4 个数值列的数据行」定位内存行（表头非数字、
+        # Swap 行只有 3 列，天然排除），LC_ALL=C 与本地化输出都能解析。
+        for line in raw.strip().splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            try:
+                nums = [float(p) for p in parts[1:]]
+            except ValueError:
+                continue
+            if len(nums) >= 4:
+                total = nums[0]
+                used = nums[1]
+                usage = (used / total * 100) if total > 0 else 0
+                details = {"total_mb": int(total), "used_mb": int(used)}
+                break
 
     elif target_type == "windows":
         # Percentage output like "75.3" — take the last plausible percentage.
         usage = _last_percent(raw)
-
-    else:  # network
-        m = re.search(r"(\d+)\s*%", raw)
-        if m:
-            usage = float(m.group(1))
 
     if usage is None:
         return {
@@ -253,362 +248,13 @@ def _parse_disk(raw: str, target_type: str) -> dict:
     }
 
 
-def _parse_interface(raw: str, target_type: str) -> dict:
-    """Parse interface status table (network devices)."""
-    interfaces = []
-    up_count = 0
-    down_count = 0
-
-    for line in raw.strip().splitlines():
-        tokens = line.split()
-        if not tokens:
-            continue
-        name = tokens[0]
-        # Skip header rows / non-interface lines (Cisco/Huawei/H3C banners).
-        if name.lower() in (
-            "interface",
-            "interface:",
-            "phy",
-            "physical",
-            "status",
-            "protocol",
-        ):
-            continue
-
-        is_up: bool | None = None
-        lowered = [t.lower() for t in tokens]
-        # Huawei/H3C "display interface brief": 2nd column is the PHY status
-        # (sometimes prefixed with '*' for error-disabled).
-        if len(tokens) >= 2 and lowered[1].lstrip("*") in ("up", "down"):
-            is_up = lowered[1].lstrip("*") == "up"
-        else:
-            # Cisco "show ip interface brief": Status/Protocol are the last cols.
-            tail = lowered[-2:]
-            if "up" in tail or "down" in tail or "administratively" in tail:
-                is_up = "up" in tail and "administratively" not in tail
-
-        if is_up is None:
-            continue
-        if is_up:
-            up_count += 1
-        else:
-            down_count += 1
-        interfaces.append({"name": name, "status": "up" if is_up else "down"})
-
-    total = up_count + down_count
-    if total == 0:
-        return {
-            "success": False,
-            "value": None,
-            "unit": "count",
-            "status": "error",
-            "details": {"raw": raw[:200]},
-        }
-
-    down_pct = (down_count / total) * 100
-    status = _evaluate_threshold("interface_down_pct", down_pct)
-    return {
-        "success": True,
-        "value": f"{up_count}/{total}",
-        "unit": "up/total",
-        "status": status,
-        "details": {
-            "total": total,
-            "up": up_count,
-            "down": down_count,
-            "down_pct": round(down_pct, 1),
-            "interfaces": interfaces[:20],  # cap list size
-        },
-    }
-
-
-def parse_interface_brief(raw: str) -> dict:
-    """
-    Parse network device interface table — NO cap on interface count.
-
-    Used by live interface-status polling for the rack U-view.
-    Returns: { success, total, up, down, interfaces: [{name, status}] }
-    """
-    interfaces = []
-    up_count = 0
-    down_count = 0
-
-    for line in raw.strip().splitlines():
-        m = re.match(r"^(\S+)\s+(UP|up|DOWN|down|ADM|admin)", line, re.IGNORECASE)
-        if m:
-            name = m.group(1)
-            status_str = m.group(2).upper()
-            is_up = status_str in ("UP",)
-            if is_up:
-                up_count += 1
-            else:
-                down_count += 1
-            interfaces.append({"name": name, "status": "up" if is_up else "down"})
-
-    total = up_count + down_count
-    if total == 0:
-        return {"success": False, "total": 0, "up": 0, "down": 0, "interfaces": []}
-
-    return {
-        "success": True,
-        "total": total,
-        "up": up_count,
-        "down": down_count,
-        "interfaces": interfaces,
-    }
-
-
-def parse_linux_links(raw: str) -> dict:
-    """
-    Parse `ip -o link` output. Each line like:
-        2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 ...
-        3: eth1: <BROADCAST,MULTICAST> mtu 1500 ...
-    The presence of "UP" inside the angle-bracket flags indicates the interface
-    is admin-up; "LOWER_UP" indicates the link is actually connected.
-    """
-    interfaces = []
-    up_count = 0
-    down_count = 0
-
-    # Pattern: "<digit>+: +<name>: +<flags>"
-    pattern = re.compile(r"^\d+:\s+([^:@\s]+)[^<]*<([^>]*)>")
-    for line in raw.strip().splitlines():
-        m = pattern.match(line)
-        if not m:
-            continue
-        name = m.group(1)
-        flags = m.group(2).upper().split(",")
-        # Skip loopback and virtual bridges — these always show UP and aren't "real" NIC ports
-        if name.lower() in ("lo",) or name.lower().startswith(
-            ("docker", "br-", "veth", "virbr")
-        ):
-            continue
-        is_admin_up = "UP" in flags
-        has_link = "LOWER_UP" in flags
-        if is_admin_up and has_link:
-            status = "up"
-            up_count += 1
-        else:
-            status = "down"
-            down_count += 1
-        interfaces.append({"name": name, "status": status})
-
-    total = up_count + down_count
-    if total == 0:
-        return {"success": False, "total": 0, "up": 0, "down": 0, "interfaces": []}
-
-    return {
-        "success": True,
-        "total": total,
-        "up": up_count,
-        "down": down_count,
-        "interfaces": interfaces,
-    }
-
-
-def parse_windows_adapters(raw: str) -> dict:
-    """
-    Parse PowerShell `Get-NetAdapter | Select Name,Status | Format-Table -AutoSize`.
-    Lines look like:
-        Name       Status
-        ----       ------
-        Ethernet0  Up
-        Ethernet1  Disabled
-    """
-    interfaces = []
-    up_count = 0
-    down_count = 0
-    seen_header = False
-
-    for line in raw.strip().splitlines():
-        s = line.strip()
-        if not s:
-            continue
-        if s.lower().startswith("name") and "status" in s.lower():
-            seen_header = True
-            continue
-        if s.startswith("-"):
-            continue
-        if not seen_header:
-            continue
-        # Match "<name> <status>" — last whitespace-separated token is status
-        parts = s.rsplit(None, 1)
-        if len(parts) != 2:
-            continue
-        name, status_str = parts
-        status_upper = status_str.upper()
-        if status_upper in ("UP",):
-            status = "up"
-            up_count += 1
-        elif status_upper in ("DOWN", "DISCONNECTED", "NOT CONNECTED"):
-            status = "down"
-            down_count += 1
-        elif status_upper in ("DISABLED", "NOT PRESENT"):
-            continue  # skip disabled — not a "real" port we can show
-        else:
-            status = "down"
-            down_count += 1
-        interfaces.append({"name": name, "status": status})
-
-    total = up_count + down_count
-    if total == 0:
-        return {"success": False, "total": 0, "up": 0, "down": 0, "interfaces": []}
-
-    return {
-        "success": True,
-        "total": total,
-        "up": up_count,
-        "down": down_count,
-        "interfaces": interfaces,
-    }
-
-
-def _parse_version(raw: str, target_type: str) -> dict:
-    """Parse system version info."""
-    return {
-        "success": True,
-        "value": raw.split("\n")[0][:80] if raw else "unknown",
-        "unit": None,
-        "status": "normal",
-        "details": {"output": raw[:500]},
-    }
-
-
-def _parse_routes(raw: str, target_type: str) -> dict:
-    """Parse routing table — count route entries."""
-    count = 0
-    for line in raw.strip().splitlines():
-        # Match lines starting with IP or routing protocol prefix
-        if re.match(r"^\d+\.\d+\.\d+\.\d+", line) or re.match(r"^[OCSRBDEI]\s", line):
-            count += 1
-
-    status = "warning" if count == 0 else "normal"
-    return {
-        "success": True,
-        "value": str(count),
-        "unit": "条",
-        "status": status,
-        "details": {"route_count": count},
-    }
-
-
-def _parse_log(raw: str, target_type: str) -> dict:
-    """Parse system logs — count error/warning entries."""
-    lower = raw.lower()
-    error_count = len(re.findall(r"error|critical|alert|emergency", lower))
-    warning_count = len(re.findall(r"warning|notice", lower))
-
-    if error_count > 5:
-        status = "critical"
-    elif error_count > 0 or warning_count > 10:
-        status = "warning"
-    else:
-        status = "normal"
-
-    return {
-        "success": True,
-        "value": f"{error_count}错误/{warning_count}警告",
-        "unit": None,
-        "status": status,
-        "details": {"error_count": error_count, "warning_count": warning_count},
-    }
-
-
-def _parse_environment(raw: str, target_type: str) -> dict:
-    """Parse environment/temperature status."""
-    return {
-        "success": True,
-        "value": raw.split("\n")[0][:80] if raw.strip() else "无数据",
-        "unit": None,
-        "status": "normal",
-        "details": {"output": raw[:500]},
-    }
-
-
-def _parse_power(raw: str, target_type: str) -> dict:
-    """Parse power supply status."""
-    lower = raw.lower()
-    has_abnormal = "fail" in lower or "off" in lower or "fault" in lower
-    return {
-        "success": True,
-        "value": "异常" if has_abnormal else "正常",
-        "unit": None,
-        "status": "warning" if has_abnormal else "normal",
-        "details": {"output": raw[:300]},
-    }
-
-
-def _parse_fan(raw: str, target_type: str) -> dict:
-    """Parse fan status."""
-    lower = raw.lower()
-    has_abnormal = "fail" in lower or "fault" in lower or "abnormal" in lower
-    return {
-        "success": True,
-        "value": "异常" if has_abnormal else "正常",
-        "unit": None,
-        "status": "warning" if has_abnormal else "normal",
-        "details": {"output": raw[:300]},
-    }
-
-
-def _parse_stp(raw: str, target_type: str) -> dict:
-    """Parse STP status."""
-    return {
-        "success": True,
-        "value": raw.split("\n")[0][:80] if raw.strip() else "无数据",
-        "unit": None,
-        "status": "normal",
-        "details": {"output": raw[:500]},
-    }
-
-
-def _parse_vlan(raw: str, target_type: str) -> dict:
-    """Parse VLAN info — count VLANs."""
-    count = 0
-    for line in raw.strip().splitlines():
-        if re.match(r"^\d+", line):
-            count += 1
-    return {
-        "success": True,
-        "value": str(count),
-        "unit": "个",
-        "status": "normal",
-        "details": {"vlan_count": count, "output": raw[:300]},
-    }
-
-
-def _parse_arp(raw: str, target_type: str) -> dict:
-    """Parse ARP table — count entries."""
-    lines = [l for l in raw.strip().splitlines() if re.match(r"^\d+\.\d+\.\d+\.\d+", l)]
-    return {
-        "success": True,
-        "value": str(len(lines)),
-        "unit": "条",
-        "status": "normal",
-        "details": {"arp_count": len(lines)},
-    }
-
-
-def _parse_mac(raw: str, target_type: str) -> dict:
-    """Parse MAC address table — count entries."""
-    lines = [
-        l
-        for l in raw.strip().splitlines()
-        if re.search(r"[0-9a-fA-F]{4}[-.][0-9a-fA-F]{4}", l)
-    ]
-    return {
-        "success": True,
-        "value": str(len(lines)),
-        "unit": "条",
-        "status": "normal",
-        "details": {"mac_count": len(lines)},
-    }
-
-
 def _parse_load(raw: str, target_type: str) -> dict:
     """Parse system load average (Linux: uptime)."""
     # "10:30:00 up 5 days, 3:20, 2 users, load average: 0.15, 0.10, 0.08"
-    m = re.search(r"load average:\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)", raw)
+    # 中文 locale 下是「平均负载：」（全角冒号），两种都认。
+    m = re.search(
+        r"(?:load average|平均负载)[:：]\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)", raw
+    )
     if m:
         load_1 = float(m.group(1))
         load_5 = float(m.group(2))
@@ -717,52 +363,190 @@ def _parse_os_version(raw: str, target_type: str) -> dict:
     }
 
 
+# sshd 握手噪声：描述的是*远端客户端*的行为（连上就挂、发垃圾数据），不是本机
+# 故障。最典型的来源是平台自己的监控探针——_check_tcp_port 每 MONITOR_INTERVAL
+# 做一次裸 TCP connect 再 close，在被探主机的 sshd 日志里恰好留下一条
+# kex_exchange_identification。不过滤的话，任何被监控的 Linux 主机「异常日志」
+# 都会被自家探针顶成常年 warning（系统性假阳性）。
+# 只从计数与状态里剔除；原始输出原样保留，安全线索（如扫描 22 端口）不丢。
+_SSHD_HANDSHAKE_NOISE = (
+    "kex_exchange_identification",
+    "banner line contains invalid characters",
+)
+
+
+# pvedaemon 的 QGA 探测噪声：'guest-ping' 超时是「guest 里没装/没跑 agent」
+# 这个慢性配置状态（PVE 把它记成 err 级），不是宿主机故障。平台自己的
+# guest IP 刷新循环（agent 失败退避 30min 重试）会让它每半小时稳定产生
+# 一条，24h 最多 48 条 → 对 PVE 宿主机巡检时「异常日志」常年 warning，
+# 真实故障被海淹没。与 sshd 握手噪声同类：只从计数与状态里剔除，
+# 原始输出保留（装 agent 后日志自然消失，不影响发现真实配置问题）。
+_PVE_AGENT_PROBE_NOISE = ("qmp command 'guest-ping' failed",)
+
+
+def _is_sshd_handshake_noise(line: str) -> bool:
+    return any(token in line for token in _SSHD_HANDSHAKE_NOISE)
+
+
+def _is_pve_agent_probe_noise(line: str) -> bool:
+    return any(token in line for token in _PVE_AGENT_PROBE_NOISE)
+
+
 def _parse_logs(raw: str, target_type: str) -> dict:
-    """Parse error logs (journalctl / event_logs)."""
-    lines = [l for l in raw.strip().splitlines() if l.strip()]
+    """Parse error logs (journalctl).
+
+    sshd 握手噪声与 pvedaemon guest-ping 超时不计入条数与状态（前者是
+    远端客户端行为，含平台自身监控探针；后者是“没装 agent”的慢性配置
+    状态且由平台 QGA 轮询自己触发）；原始输出仍完整保留在
+    details.output，安全线索不丢。被滤掉的条数记在 details.filtered_noise，
+    便于排查「为什么计数比原始少」。
+    """
+    all_lines = [l for l in raw.strip().splitlines() if l.strip()]
+    lines = [
+        l
+        for l in all_lines
+        if not (_is_sshd_handshake_noise(l) or _is_pve_agent_probe_noise(l))
+    ]
+    noise = len(all_lines) - len(lines)
     return {
         "success": True,
         "value": str(len(lines)),
         "unit": "条",
         "status": "warning" if len(lines) > 10 else "normal",
-        "details": {"error_count": len(lines), "output": raw[:500]},
+        "details": {
+            "error_count": len(lines),
+            "filtered_noise": noise,
+            "output": raw[:500],
+        },
     }
 
 
+# systemd 单元名后缀。`systemctl --failed` 的表格除单元行外还有表头、
+# LOAD/ACTIVE/SUB 图例和两行提示文案，只有首字段是单元名的行才算失败服务。
+_UNIT_SUFFIXES = (
+    ".service",
+    ".socket",
+    ".device",
+    ".mount",
+    ".automount",
+    ".swap",
+    ".target",
+    ".path",
+    ".timer",
+    ".slice",
+    ".scope",
+)
+
+
+def _failed_unit_lines(raw: str) -> list[str]:
+    """从 `systemctl --failed` 输出里挑出真正的失败单元行。
+
+    失败单元行以 "●" 起头，图例与提示行的首字段不是单元名。旧实现按前缀把 "●"
+    行整条丢掉、又把 "LOAD   = ..." 这类图例当成服务，于是真有服务挂掉时
+    既漏掉真凶、又混进说明文字（单机 1 个失败服务会被数成 4 个）。
+    """
+    units: list[str] = []
+    for raw_line in raw.splitlines():
+        line = raw_line.strip().removeprefix("●").strip()
+        if line and line.split()[0].endswith(_UNIT_SUFFIXES):
+            units.append(line)
+    return units
+
+
+def _windows_scm_failures(raw: str) -> list[dict]:
+    """解析 Windows 服务异常命令的输出。
+
+    输出契约(见 inspection_commands.WINDOWS_SCM_FAILURE_COMMAND)：每行
+    ``发生次数|事件ID|服务名``，已按「事件ID|服务名」聚合过。
+
+    服务名取自事件的 ReplacementStrings 而非 Message，因此与系统语言无关
+    （中文 Windows 上 Message 是中文，用正则抽服务名会直接失效）。
+    """
+    events: list[dict] = []
+    for raw_line in raw.strip().splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # 服务名里理论上可以含 '|'，所以只切前两个分隔符
+        parts = line.split("|", 2)
+        if len(parts) < 2:
+            continue
+        try:
+            occurrences = int(parts[0].strip())
+            event_id = int(parts[1].strip())
+        except ValueError:
+            # 不是我们要求的形状(例如旧版本的 Format-Table 残留输出)，跳过
+            continue
+        service = parts[2].strip() if len(parts) > 2 else ""
+        events.append(
+            {
+                "service": service,
+                "event_id": event_id,
+                "event_meaning": SCM_FAILURE_EVENT_IDS.get(event_id, ""),
+                "occurrences": max(occurrences, 1),
+            }
+        )
+    return events
+
+
 def _parse_failed_services(raw: str, target_type: str) -> dict:
-    """Parse failed/stopped-auto services."""
+    """统计「真的出了问题」的服务。
+
+    Linux 走 ``systemctl --failed``；Windows 查系统日志里 Service Control Manager
+    的失败事件(7000/7001/7009/7011/7023/7024/7031/7034)，按**服务名去重**后计数。
+
+    为什么按服务名而不是按事件数：同一个服务同时触发 7031 与 7034、或在 24 小时内
+    反复崩溃，都只是「一个服务有问题」；按事件数计会把崩溃循环放大成 critical。
+    发生次数保留在 details 与原始输出里，严重程度不丢。
+    """
     if target_type == "windows":
-        # PowerShell Format-Table output
-        lines = [
-            l
-            for l in raw.strip().splitlines()
-            if l.strip() and "Name" not in l and "---" not in l
+        events = _windows_scm_failures(raw)
+        by_service: dict[str, dict] = {}
+        for event in events:
+            key = event["service"] or f"未知服务(事件 {event['event_id']})"
+            slot = by_service.setdefault(
+                key, {"event_ids": set(), "occurrences": 0, "meanings": []}
+            )
+            slot["event_ids"].add(event["event_id"])
+            slot["occurrences"] += event["occurrences"]
+            if (
+                event["event_meaning"]
+                and event["event_meaning"] not in slot["meanings"]
+            ):
+                slot["meanings"].append(event["event_meaning"])
+        count = len(by_service)
+        # 崩溃次数多的排前面，方便先看到最吵的那个
+        ordered = sorted(
+            by_service.items(), key=lambda kv: (-kv[1]["occurrences"], kv[0])
+        )
+        services = [
+            f"{name}｜{'、'.join(slot['meanings']) or '事件 ' + ','.join(str(i) for i in sorted(slot['event_ids']))}"
+            f"｜{slot['occurrences']} 次"
+            for name, slot in ordered
         ]
+        details = {
+            "failed_count": count,
+            "services": services[:10],
+            "window_hours": WINDOWS_SERVICE_FAILURE_WINDOW_HOURS,
+            "event_count": sum(event["occurrences"] for event in events),
+        }
     else:
-        # systemctl --failed → count UNIT lines
-        lines = [
-            l
-            for l in raw.strip().splitlines()
-            if l.strip()
-            and not l.startswith("UNIT")
-            and not l.startswith("●")
-            and "units listed" not in l.lower()
-        ]
+        svc_lines = _failed_unit_lines(raw)
+        count = len(svc_lines)
+        details = {
+            "failed_count": count,
+            "services": [line.strip()[:80] for line in svc_lines[:10]],
+        }
 
-    # Filter actual service lines (not headers/empty)
-    svc_lines = [l for l in lines if l.strip() and not all(c in "-\t " for c in l)]
-    count = len(svc_lines)
-
-    status = "critical" if count > 0 else "normal"
+    # 走 THRESHOLDS：0 个 normal，1~2 个 warning，3 个及以上 critical。
+    # Windows 侧现在数的是真实失败而非「停着的自动服务」，所以 1 个就值得告警。
+    status = _evaluate_threshold("failed_services", count)
     return {
         "success": True,
         "value": str(count),
         "unit": "个",
         "status": status,
-        "details": {
-            "failed_count": count,
-            "services": [l.strip()[:80] for l in svc_lines[:10]],
-        },
+        "details": details,
     }
 
 
@@ -857,19 +641,108 @@ def _parse_system_info(raw: str, target_type: str) -> dict:
     }
 
 
+# Windows 事件日志已知噪声（来源, 事件ID）。这些都是微软官方定性为可安全忽略、
+# 或属于系统自恢复行为的事件，计入条数只会把「事件日志」项刷成警告：
+#   DCOM 10010        服务器未在超时内注册（多为系统更新/服务启动慢，且消息文件常缺失）
+#   DCOM 10016        分布式 COM 本地激活权限，微软文档明确“by design，可忽略”
+#   SCM 7030          “标记为交互服务但系统不允许交互”提示（系统更新后常见，服务照常工作）
+#   TPM-WMI 1801      “需要更新安全启动 CA/密钥”——SeaBIOS 等虚拟机固件没有可更新的
+#                     Secure Boot DB，虚拟 TPM 上周期性提示，虚拟化平台通病
+#   Schannel 36874    远端客户端发起低版本/无共同密码套件的 TLS 握手被服务器拒绝，
+#                     属远端行为（扫描器/老旧客户端/监控探针），与 Linux sshd 握手
+#                     噪声同性质；且爆发时一秒几十条会占满采样窗口淹没真实事件
+#   SCM 7040/7036 类状态切换是 Information 级，进不了 Error 查询，不在此列
+_WINDOWS_EVENT_NOISE_IDS: frozenset[tuple[str, int]] = frozenset(
+    {
+        ("DCOM", 10010),
+        ("DCOM", 10016),
+        ("Service Control Manager", 7030),
+        ("Microsoft-Windows-TPM-WMI", 1801),
+        ("Schannel", 36874),
+    }
+)
+
+# SCM 7023「服务因下列错误而停止」中属于自恢复的组合：错误码 21(ERROR_NOT_READY)
+# 与 2147942414(ERROR_FILE_NOT_FOUND 的 HRESULT 形式) 落在打印/网络辅助服务上，
+# 多为无机可用时退出或重启即恢复，不是持续故障。
+# 注意消息里是服务**显示名**（"IP Helper" 这种带空格的），不是服务名（iphlpsvc），
+# 所以用包含匹配而不是精确等值；中英文系统的显示名都是英文原名。
+_WINDOWS_EVENT_NOISE_7023_NAMES = (
+    "spooler",
+    "printnotify",
+    "print workflow",
+    "ip helper",
+    "iphlpsvc",
+)
+_WINDOWS_EVENT_NOISE_7023_CODES = ("%%21", "%%2147942414")
+
+# 事件日志项最多展示多少类有效事件
+_EVENT_LOGS_MAX_KEPT = 20
+
+# 一天内出现多少「类」不同的错误才报警。聚合后同一事件爆发多少次都算 1 类，
+# 超过 5 类不同错误基本是系统真出问题了。
+_EVENT_LOGS_WARN_CLASSES = 5
+
+
+def _is_windows_event_noise(source: str, event_id: int, message: str) -> bool:
+    """判断一条 Windows Error 级系统事件是否为已知慢性噪声（每天复发型）。"""
+    if (source, event_id) in _WINDOWS_EVENT_NOISE_IDS:
+        return True
+    if source == "Service Control Manager" and event_id == 7023:
+        lowered = message.lower()
+        if any(n in lowered for n in _WINDOWS_EVENT_NOISE_7023_NAMES) and any(
+            c in message for c in _WINDOWS_EVENT_NOISE_7023_CODES
+        ):
+            return True
+    return False
+
+
 def _parse_event_logs(raw: str, target_type: str) -> dict:
-    """Parse Windows event logs."""
-    lines = [
-        l
-        for l in raw.strip().splitlines()
-        if l.strip() and "TimeGenerated" not in l and "--" not in l
-    ]
+    """解析 Windows 系统日志 Error 级事件（管道格式，见 inspection_commands.event_logs）。
+
+    系统性防误报口径：
+      1. 命令侧已限定最近 24 小时；
+      2. 按「来源+事件ID」聚类，爆发 N 次只算 1 类（展示为 ``N× 样本行``），
+         按「类数 > 5」判 warning——未知新型噪音天然只有 1 类，不会误报；
+      3. 已知慢性噪声（每天复发型）按噪声表剔除，被滤条数记 details.filtered_noise；
+         原始输出完整保留在 raw_output，安全线索不丢。
+    无法按新格式解析的行（旧 Format-Table 残留等）每行单独成类，宁可多报不漏报。
+    """
+    noise = 0
+    # key: (来源, 事件ID)；value: [样本行, 次数]。无法解析的行用整行做 key。
+    groups: dict[tuple[str, str], list] = {}
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|", 3)
+        if len(parts) >= 4:
+            try:
+                event_id = int(parts[2].strip())
+            except ValueError:
+                groups.setdefault((line, ""), [line, 0])[1] += 1
+                continue
+            source = parts[1].strip()
+            if _is_windows_event_noise(source, event_id, parts[3]):
+                noise += 1
+                continue
+            key = (source, parts[2].strip())
+            groups.setdefault(key, [line, 0])[1] += 1
+        else:
+            groups.setdefault((line, ""), [line, 0])[1] += 1
+    # 按发生次数降序展示，同类取最新一条作样本（命令输出本身按时间倒序）
+    classes = sorted(groups.values(), key=lambda g: -g[1])[:_EVENT_LOGS_MAX_KEPT]
+    shown = [f"{count}× {sample}" if count > 1 else sample for sample, count in classes]
     return {
         "success": True,
-        "value": str(len(lines)),
-        "unit": "条",
-        "status": "warning" if len(lines) > 5 else "normal",
-        "details": {"error_count": len(lines), "output": raw[:500]},
+        "value": str(len(classes)),
+        "unit": "类",
+        "status": "warning" if len(classes) > _EVENT_LOGS_WARN_CLASSES else "normal",
+        "details": {
+            "error_count": len(classes),
+            "filtered_noise": noise,
+            "output": "\n".join(shown)[:500],
+        },
     }
 
 
@@ -890,18 +763,74 @@ def _parse_updates(raw: str, target_type: str) -> dict:
 
 
 def _parse_uptime(raw: str, target_type: str) -> dict:
-    """Parse Windows uptime."""
-    days = hours = minutes = 0
-    m = re.search(r"(\d+)\s*Days?", raw)
-    if m:
-        days = int(m.group(1))
-    m = re.search(r"(\d+)\s*Hours?", raw)
-    if m:
-        hours = int(m.group(1))
-    m = re.search(r"(\d+)\s*Minutes?", raw)
-    if m:
-        minutes = int(m.group(1))
+    r"""Parse Windows uptime.
 
+    兼容两种输出形状：
+
+    * ``Select-Object Days,Hours,Minutes`` 的表格（当前命令的真实输出）：
+      表头一行、分隔线一行、数字一行，列顺序按表头取；
+    * ``3 Days, 12 Hours, 45 Minutes`` 这类自然语言串。
+
+    旧版只认后者，而正则 ``(\d+)\s*Days?`` 要求「数字在前」，对表格输出
+    永远匹配不上，于是无论机器跑了多久都返回 ``0天0时0分`` 并且报 normal。
+    现在两者都认；都认不出来时如实返回失败，不再假装成功。
+    """
+    days = hours = minutes = None
+
+    # 形状 A：自然语言（数字在前）
+    for key, pattern in (
+        ("days", r"(\d+)\s*Days?\b"),
+        ("hours", r"(\d+)\s*Hours?\b"),
+        ("minutes", r"(\d+)\s*Minutes?\b"),
+    ):
+        m = re.search(pattern, raw, re.IGNORECASE)
+        if m:
+            value = int(m.group(1))
+            if key == "days":
+                days = value
+            elif key == "hours":
+                hours = value
+            else:
+                minutes = value
+
+    # 形状 B：Select-Object 表格——按表头列序定位数字行
+    if days is None and hours is None and minutes is None:
+        lines = raw.strip().splitlines()
+        for idx, line in enumerate(lines):
+            header = re.findall(r"Days|Hours|Minutes", line, re.IGNORECASE)
+            if len(header) < 2:
+                continue
+            # 表头之后的第一行纯数字就是值；分隔线 "---- -----" 会被跳过
+            for value_line in lines[idx + 1 :]:
+                tokens = value_line.split()
+                if len(tokens) != len(header):
+                    continue
+                if not all(re.fullmatch(r"\d+", t) for t in tokens):
+                    continue
+                # 上面已校验 len(tokens) == len(header)，strict 用于把这个前提显式化
+                for column, token in zip(header, tokens, strict=True):
+                    if column.lower() == "days":
+                        days = int(token)
+                    elif column.lower() == "hours":
+                        hours = int(token)
+                    else:
+                        minutes = int(token)
+                break
+            if days is not None or hours is not None or minutes is not None:
+                break
+
+    if days is None and hours is None and minutes is None:
+        return {
+            "success": False,
+            "value": None,
+            "unit": None,
+            "status": "error",
+            "details": {"raw": raw[:200]},
+        }
+
+    days = days or 0
+    hours = hours or 0
+    minutes = minutes or 0
     total_hours = days * 24 + hours
     return {
         "success": True,

@@ -13,34 +13,26 @@ const cards = computed(() => {
     {
       label: '设备总数',
       value: o.device_total,
-      color: '#5b9eff',
-      bgColor: 'rgba(91, 158, 255, 0.15)',
+      color: '#60a5fa',
+      bgColor: 'rgba(59, 130, 246, 0.14)',
       percent: 100,
-      icon: `<svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="#5b9eff" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>`,
+      icon: `<svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="#60a5fa" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>`,
     },
     {
       label: '在线设备',
       value: o.device_online,
-      color: '#00ff88',
-      bgColor: 'rgba(0, 255, 136, 0.15)',
+      color: '#22c55e',
+      bgColor: 'rgba(34, 197, 94, 0.14)',
       percent: (o.device_online / total) * 100,
-      icon: `<svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="#00ff88" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
+      icon: `<svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="#22c55e" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
     },
     {
       label: '离线设备',
       value: o.device_offline,
-      color: '#ff4d6a',
-      bgColor: 'rgba(255, 77, 106, 0.15)',
+      color: '#f05252',
+      bgColor: 'rgba(240, 82, 82, 0.14)',
       percent: (o.device_offline / total) * 100,
-      icon: `<svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="#ff4d6a" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
-    },
-    {
-      label: '维护中',
-      value: o.device_maintenance,
-      color: '#ff9500',
-      bgColor: 'rgba(255, 149, 0, 0.15)',
-      percent: (o.device_maintenance / total) * 100,
-      icon: `<svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="#ff9500" stroke-width="1.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+      icon: `<svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="#f05252" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
     },
   ]
 })
@@ -50,12 +42,7 @@ const cards = computed(() => {
   <div class="overview-stats">
     <div class="panel-title">设备概览</div>
     <div class="overview-stats__grid">
-      <div
-        v-for="card in cards"
-        :key="card.label"
-        class="overview-stats__card"
-        :style="{ background: card.bgColor }"
-      >
+      <div v-for="card in cards" :key="card.label" class="overview-stats__card" :style="{ background: card.bgColor }">
         <div class="overview-stats__icon" v-html="card.icon" />
         <div class="overview-stats__info">
           <div class="overview-stats__value" :style="{ color: card.color }">
@@ -96,7 +83,7 @@ const cards = computed(() => {
   gap: var(--dcn-space-3);
   padding: var(--dcn-space-3);
   border-radius: var(--dcn-radius-xl);
-  border: 1px solid rgba(91, 158, 255, 0.15);
+  border: 1px solid var(--dcn-border);
   transition: transform 0.3s ease;
 }
 
@@ -123,7 +110,7 @@ const cards = computed(() => {
 
 .overview-stats__label {
   font-size: var(--dcn-text-sm);
-  color: rgba(200, 215, 245, 0.65);
+  color: var(--dcn-text-secondary);
   margin-top: var(--dcn-space-1);
 }
 

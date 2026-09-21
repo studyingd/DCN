@@ -1,0 +1,97 @@
+/* DCN global interface foundation.
+   Page-level components can specialize this system, but should not redefine
+   the application canvas, surface, typography, focus, or responsive rules. */
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  min-width: 320px;
+  background: var(--dcn-bg-page);
+  color: var(--dcn-text-primary);
+  font-family: var(--dcn-font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+body {
+  overflow: hidden;
+}
+
+::selection {
+  background: var(--dcn-primary-bg-deep);
+  color: var(--dcn-text-primary);
+}
+
+a {
+  color: var(--dcn-primary-light);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--dcn-text-primary);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  touch-action: manipulation;
+}
+
+/* Element Plus poppers are teleported to body, so they need a stable global
+   surface even when the originating page is inside a scoped style block. */
+.el-popper,
+.el-select__popper,
+.el-picker__popper,
+.el-dropdown__popper,
+.el-popover.el-popper {
+  border: 1px solid var(--dcn-border) !important;
+  border-radius: var(--dcn-radius-lg) !important;
+  background: var(--dcn-bg-elevated) !important;
+  box-shadow: var(--dcn-shadow-lg) !important;
+}
+
+.el-popper__arrow::before {
+  border-color: var(--dcn-border) !important;
+  background: var(--dcn-bg-elevated) !important;
+}
+
+/* EP styles `.el-popper.is-dark` as `color: var(--el-bg-color)` on a
+   `var(--el-text-color-primary)` background, which only works under EP's
+   default light theme. tokens.css remaps both variables for the dark theme
+   (--el-bg-color -> #111827, --el-text-color-primary -> #f1f5f9), so the
+   text color inverts to near-black while the rule above forces the surface to
+   --dcn-bg-elevated (#111a2b). That is a 1.02:1 contrast ratio: the tooltip
+   has content but renders as an empty box. Most visible on el-table cells
+   using show-overflow-tooltip. Pin the text color to the forced surface. */
+.el-popper.is-dark {
+  color: var(--dcn-text-primary) !important;
+}
+
+.el-message-box {
+  border: 1px solid var(--dcn-border) !important;
+  border-radius: var(--dcn-radius-xl) !important;
+  background: var(--dcn-bg-card) !important;
+}
+
+.el-message-box__title,
+.el-message-box__content {
+  color: var(--dcn-text-primary) !important;
+}
+
+.el-message-box__message {
+  color: var(--dcn-text-regular) !important;
+}
+
+@media (max-width: 768px) {
+  body {
+    overflow: auto;
+  }
+}

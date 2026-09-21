@@ -1,20 +1,25 @@
 <template>
-  <div class="terminal-page">
+  <div class="terminal-page" data-theme="dark">
     <!-- Device Sidebar -->
     <aside v-if="sidebarVisible" class="terminal-sidebar">
       <div class="sidebar-header">
         <span>同机柜设备</span>
-        <el-button text size="small" @click="sidebarVisible = false">
+        <el-button text size="small" aria-label="收起设备侧栏" @click="sidebarVisible = false">
           <el-icon><ArrowLeft /></el-icon>
         </el-button>
       </div>
-      <div class="sidebar-body" v-loading="siblingLoading">
+      <div v-loading="siblingLoading" class="sidebar-body">
         <div
           v-for="dev in siblingDevices"
           :key="dev.id"
           class="sidebar-device"
           :class="{ active: dev.id === state.deviceId }"
+          role="button"
+          tabindex="0"
+          :aria-label="`连接设备 ${dev.name}`"
           @click="connectDevice(dev)"
+          @keydown.enter="connectDevice(dev)"
+          @keydown.space.prevent="connectDevice(dev)"
         >
           <span class="status-dot" :class="'status-' + dev.status" />
           <div class="sidebar-device-info">
@@ -26,66 +31,90 @@
           </div>
           <div class="sidebar-device-actions">
             <el-button
-              v-if="dev.os_system === 'linux'"
-              text size="small"
-              :disabled="dev.status === 'offline'"
-              @click.stop="connectDevice(dev, 'ssh')"
-            >SSH</el-button>
-            <el-button
-              v-if="dev.os_system === 'windows'"
-              text size="small"
+              v-if="isWindowsOs(dev.os_system)"
+              text
+              size="small"
               :disabled="dev.status === 'offline'"
               @click.stop="connectDevice(dev, 'rdp')"
-            >RDP</el-button>
+              >RDP</el-button
+            >
+            <el-button
+              v-else
+              text
+              size="small"
+              :disabled="dev.status === 'offline'"
+              @click.stop="connectDevice(dev, 'ssh')"
+              >SSH</el-button
+            >
           </div>
         </div>
-        <div v-if="siblingDevices.length === 0 && !siblingLoading" class="sidebar-empty">
-          暂无其他设备
-        </div>
+        <div v-if="siblingDevices.length === 0 && !siblingLoading" class="sidebar-empty">暂无其他设备</div>
       </div>
     </aside>
 
     <!-- Main terminal area -->
     <div class="terminal-main">
       <Terminal
+        v-if="credReady"
         ref="terminalRef"
         :key="terminalKey"
-        :deviceId="state.deviceId"
-        :connType="state.connType"
-        :deviceIp="state.deviceIp"
-        :sshUsername="state.username"
-        :sshPassword="state.password"
-        :credentialId="state.credentialId"
+        :device-id="state.deviceId"
+        :conn-type="state.connType"
+        :device-ip="state.deviceIp"
+        :ssh-username="state.username"
+        :ssh-password="state.password"
+        :credential-id="state.credentialId"
+        :container="containerName"
+        :ticket="pveTicket"
+        :ws-path="pveWsPath"
+        :fixed-rdp-resolution="isPveRemote"
+        :minimal="isPveRemote"
+        :enable-files="isPveRemote ? state.deviceId !== 0 : undefined"
         @close="handleClose"
         @fullscreen="toggleFullscreen"
       />
     </div>
 
     <!-- Toggle sidebar button (when hidden) -->
-    <div v-if="!sidebarVisible" class="sidebar-toggle" @click="sidebarVisible = true">
+    <button
+      v-if="!sidebarVisible && !isPveRemote"
+      type="button"
+      class="sidebar-toggle"
+      aria-label="展开设备侧栏"
+      @click="sidebarVisible = true"
+    >
       <el-icon><ArrowRight /></el-icon>
-    </div>
+    </button>
   </div>
 </template>
 
 <script setup lang="ts">
 import { reactive, ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import Terminal from '@/components/terminal/Terminal.vue'
 import { deviceAPI } from '@/api'
 import type { Device } from '@/types'
 
 const typeLabels: Record<string, string> = {
-  server: '服务器', switch: '交换机', router: '路由器', firewall: '防火墙', host: '主机',
+  server: '服务器',
+  cloud_server: '云服务器',
+  host: '台式主机',
 }
 
 const errorMessage = ref('')
+const router = useRouter()
+const closing = ref(false)
 
 // Read URL params
 const params = new URLSearchParams(window.location.search)
 const deviceId = params.get('deviceId')
 const connType = params.get('connType')
+const containerName = params.get('container') || undefined
+const pveTicket = params.get('pveTicket') || undefined
+const pveWsPath = params.get('pveWsPath') || undefined
+const isPveRemote = !!pveTicket && !!pveWsPath
 
 if (!deviceId || !connType) {
   // Render an error message instead of calling window.close(), which is silently
@@ -100,6 +129,9 @@ if (!deviceId || !connType) {
 let storedUsername = ''
 let storedPassword = ''
 const hasCred = params.get('hasCred') === '1'
+// hasCred 时凭据经 BroadcastChannel 异步送达;门控 Terminal 的挂载,
+// 否则 openConnection 会带着空 username/password 发出首张票据请求。
+const credReady = ref(!hasCred)
 
 if (hasCred) {
   const bc = new BroadcastChannel('dcn_terminal_cred')
@@ -110,11 +142,15 @@ if (hasCred) {
       bc.close()
       resolve()
     }
-    setTimeout(() => { bc.close(); resolve() }, 3000)
+    setTimeout(() => {
+      bc.close()
+      resolve()
+    }, 3000)
   })
   credPromise.then(() => {
     state.username = storedUsername
     state.password = storedPassword
+    credReady.value = true
   })
 }
 
@@ -131,7 +167,7 @@ const state = reactive({
 const terminalKey = ref(0)
 
 // Sidebar state
-const sidebarVisible = ref(true)
+const sidebarVisible = ref(!isPveRemote)
 const siblingDevices = ref<Device[]>([])
 const siblingLoading = ref(false)
 
@@ -148,8 +184,14 @@ async function loadSiblings() {
   }
 }
 
+// os_system 可能是精确版本名(如 "Microsoft Windows Server 2019 Standard"、
+// "Windows (SMB 2.x+)"),必须包含匹配——等值判断会漏判并错选协议。
+function isWindowsOs(os: string | null | undefined): boolean {
+  return (os || '').toLowerCase().includes('windows')
+}
+
 function connectDevice(dev: Device, forceType?: 'ssh' | 'rdp') {
-  const type = forceType || (dev.os_system === 'windows' ? 'rdp' : 'ssh')
+  const type = forceType || (isWindowsOs(dev.os_system) ? 'rdp' : 'ssh')
   if (dev.id === state.deviceId && type === state.connType) return
 
   state.deviceId = dev.id
@@ -175,10 +217,25 @@ function connectDevice(dev: Device, forceType?: 'ssh' | 'rdp') {
 const terminalRef = ref<InstanceType<typeof Terminal> | null>(null)
 
 async function handleClose() {
-  if (terminalRef.value?.gracefulClose) {
-    await terminalRef.value.gracefulClose()
+  if (closing.value) return
+  closing.value = true
+
+  try {
+    if (terminalRef.value?.gracefulClose) {
+      await terminalRef.value.gracefulClose()
+    }
+    ElMessage.success('会话已关闭')
+  } catch {
+    ElMessage.warning('会话正在关闭')
   }
+
   window.close()
+  window.setTimeout(() => {
+    if (!window.closed) {
+      document.title = 'DCN - 数据中心网络可视化'
+      router.replace('/')
+    }
+  }, 150)
 }
 
 function toggleFullscreen() {
@@ -196,17 +253,17 @@ onMounted(loadSiblings)
 .terminal-page {
   display: flex;
   width: 100vw;
-  height: 100vh;
-  background: #1e1e1e;
+  height: 100dvh;
+  background: var(--dcn-bg-page);
   overflow: hidden;
   position: relative;
 }
 
 .terminal-sidebar {
-  width: 240px;
-  min-width: 240px;
-  background: #252526;
-  border-right: 1px solid #3c3c3c;
+  width: 264px;
+  min-width: 264px;
+  background: var(--dcn-bg-section);
+  border-right: 1px solid var(--dcn-border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -216,47 +273,54 @@ onMounted(loadSiblings)
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--dcn-space-2) var(--dcn-space-3);
+  min-height: 52px;
+  padding: var(--dcn-space-2) var(--dcn-space-4);
   font-size: var(--dcn-text-base);
   font-weight: 600;
-  color: #d4d4d4;
-  border-bottom: 1px solid #3c3c3c;
+  color: var(--dcn-text-primary);
+  border-bottom: 1px solid var(--dcn-border);
   user-select: none;
 }
 
 .sidebar-header .el-button {
-  color: #808080 !important;
+  color: var(--dcn-text-secondary) !important;
   padding: var(--dcn-radius-xs);
 }
 
 .sidebar-header .el-button:hover {
-  color: #d4d4d4 !important;
+  color: var(--dcn-text-primary) !important;
 }
 
 .sidebar-body {
   flex: 1;
   overflow-y: auto;
-  padding: var(--dcn-space-1);
+  padding: var(--dcn-space-2);
 }
 
 .sidebar-device {
   display: flex;
   align-items: center;
   gap: var(--dcn-space-2);
-  padding: var(--dcn-space-2);
-  border-radius: var(--dcn-radius-sm);
+  min-height: 52px;
+  padding: var(--dcn-space-2) var(--dcn-space-3);
+  border: 1px solid transparent;
+  border-radius: var(--dcn-radius-lg);
   cursor: pointer;
   transition: background var(--dcn-transition-fast);
-  margin-bottom: var(--dcn-radius-xs);
+  margin-bottom: var(--dcn-space-1);
 }
 
 .sidebar-device:hover {
-  background: #2a2d2e;
+  background: var(--dcn-bg-muted);
+}
+.sidebar-device:focus-visible {
+  outline: 2px solid var(--dcn-primary-light);
+  outline-offset: 2px;
 }
 
 .sidebar-device.active {
-  background: #37373d;
-  border: 1px solid var(--dcn-primary);
+  background: var(--dcn-primary-bg);
+  border-color: rgba(96, 165, 250, 0.34);
 }
 
 .sidebar-device-info {
@@ -267,7 +331,7 @@ onMounted(loadSiblings)
 .sidebar-device-name {
   display: block;
   font-size: var(--dcn-text-base);
-  color: #d4d4d4;
+  color: var(--dcn-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -281,12 +345,12 @@ onMounted(loadSiblings)
 
 .sidebar-device-type {
   font-size: var(--dcn-text-xs);
-  color: #808080;
+  color: var(--dcn-text-secondary);
 }
 
 .sidebar-device-ip {
   font-size: var(--dcn-text-xs);
-  color: #606060;
+  color: var(--dcn-text-placeholder);
   font-family: var(--dcn-font-mono);
 }
 
@@ -301,7 +365,7 @@ onMounted(loadSiblings)
 }
 
 .sidebar-device-actions .el-button:disabled {
-  color: #555 !important;
+  color: var(--el-text-color-disabled) !important;
 }
 
 .status-dot {
@@ -312,13 +376,19 @@ onMounted(loadSiblings)
   margin-top: 1px;
 }
 
-.status-online { background: var(--dcn-dot-online); }
-.status-offline { background: #606266; }
-.status-maintenance { background: var(--dcn-dot-maintenance); }
+.status-online {
+  background: var(--dcn-dot-online);
+}
+.status-offline {
+  background: var(--dcn-dot-offline);
+}
+.status-maintenance {
+  background: var(--dcn-dot-maintenance);
+}
 
 .sidebar-empty {
   text-align: center;
-  color: #606060;
+  color: var(--dcn-text-placeholder);
   font-size: var(--dcn-text-base);
   padding: var(--dcn-space-6) 0;
 }
@@ -333,22 +403,23 @@ onMounted(loadSiblings)
   left: 0;
   top: 50%;
   transform: translateY(-50%);
-  width: 20px;
+  width: 26px;
   height: 48px;
-  background: #252526;
-  border: 1px solid #3c3c3c;
+  background: var(--dcn-bg-section);
+  border: 1px solid var(--dcn-border);
   border-left: none;
   border-radius: 0 var(--dcn-radius-sm) var(--dcn-radius-sm) 0;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  color: #808080;
+  color: var(--dcn-text-secondary);
   z-index: 10;
+  padding: 0;
 }
 
 .sidebar-toggle:hover {
-  background: #2a2d2e;
-  color: #d4d4d4;
+  background: var(--dcn-bg-muted);
+  color: var(--dcn-text-primary);
 }
 </style>

@@ -33,6 +33,19 @@ def _parse_field(field: str, min_val: int, max_val: int) -> set[int]:
     return result
 
 
+def _normalize_weekday(values: set[int]) -> set[int]:
+    """cron 惯例里 7 也表示周日（与 0 等价），统一折回 0。
+
+    不折回的话 ``parse_cron`` 会“成功”，但 ``next_cron_time`` 比较时用的是
+    ``(weekday() + 1) % 7`` ∈ 0..6，永远匹配不到 7，最终抛
+    “No matching time found within 1 year”——用户看到的是一句看不懂的报错。
+    区间同样适用：``5-7`` = 周五/周六/周日 → {5, 6, 0}。
+    """
+    if 7 not in values:
+        return values
+    return {0 if v == 7 else v for v in values}
+
+
 def parse_cron(expr: str) -> dict:
     fields = expr.strip().split()
     if len(fields) != 5:
@@ -42,8 +55,8 @@ def parse_cron(expr: str) -> dict:
         "hour": _parse_field(fields[1], 0, 23),
         "day": _parse_field(fields[2], 1, 31),
         "month": _parse_field(fields[3], 1, 12),
-        # cron: Sunday=0; store as-is, convert at comparison time
-        "weekday": _parse_field(fields[4], 0, 6),
+        # cron: Sunday=0（7 也接受，归一化到 0）;store as-is, convert at comparison time
+        "weekday": _normalize_weekday(_parse_field(fields[4], 0, 7)),
     }
 
 

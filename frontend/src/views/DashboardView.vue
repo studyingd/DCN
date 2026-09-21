@@ -3,29 +3,82 @@
     <!-- Top Bar -->
     <header class="top-bar">
       <div class="top-bar-left">
-        <el-icon :size="24" color="#fff"><Monitor /></el-icon>
-        <span class="top-bar-title">DCN 数据中心网络可视化</span>
+        <span class="brand-mark"
+          ><el-icon :size="20"><Monitor /></el-icon
+        ></span>
+        <span class="brand-copy">
+          <strong class="top-bar-title">DCN</strong>
+          <small>数据中心运维控制台</small>
+        </span>
       </div>
       <div class="top-bar-center">
-        <el-popover placement="bottom" :width="420" trigger="focus" :visible="searchVisible" @update:visible="searchVisible = $event">
+        <el-popover
+          placement="bottom"
+          :width="420"
+          trigger="focus"
+          :visible="searchVisible"
+          @update:visible="searchVisible = $event"
+        >
           <template #reference>
-            <el-input v-model="searchQuery" placeholder="搜索设备（IP 或名称）..." prefix-icon="Search" clearable size="default" class="search-input" @input="onSearchInput" @focus="searchVisible = true" @clear="searchResults = []" />
+            <el-input
+              v-model="searchQuery"
+              placeholder="搜索设备 / 虚拟机（IP 或名称）..."
+              prefix-icon="Search"
+              clearable
+              size="default"
+              class="search-input"
+              @input="onSearchInput"
+              @focus="searchVisible = true"
+              @clear="resetSearch"
+            />
           </template>
-          <div v-if="searchResults.length > 0" class="search-results">
-            <div v-for="item in searchResults" :key="item.device.id" class="search-result-item" @click="onSearchSelect(item)">
-              <div class="search-result-main">
-                <span class="status-dot" :class="statusDotClass(item.device.status)" />
-                <span class="search-result-name">{{ item.device.name }}</span>
-                <el-tag size="small" :type="deviceTypeTagType(item.device.type)">{{ deviceTypeLabel(item.device.type) }}</el-tag>
-              </div>
-              <div class="search-result-meta">
-                <span>{{ item.device.ip_address || '-' }}</span>
-                <span class="search-result-path">{{ item.roomName }} / {{ item.rackName }}</span>
-              </div>
-            </div>
+          <div v-if="searchLoading" class="search-empty"><span>搜索中…</span></div>
+          <div v-else-if="searchDevices.length || searchGuests.length" class="search-results">
+            <template v-if="searchDevices.length">
+              <div class="search-group-title">设备</div>
+              <button
+                v-for="dev in searchDevices"
+                :key="`dev-${dev.id}`"
+                type="button"
+                class="search-result-item"
+                @click="onSearchSelectDevice(dev)"
+              >
+                <div class="search-result-main">
+                  <span class="status-dot" :class="statusDotClass(dev.status)" />
+                  <span class="search-result-name">{{ dev.name }}</span>
+                  <el-tag size="small" :type="deviceTypeTagType(dev.type)">{{ deviceTypeLabel(dev.type) }}</el-tag>
+                </div>
+                <div class="search-result-meta">
+                  <span>{{ dev.ip_address || '-' }}</span>
+                  <span class="search-result-path">{{ dev.room_name }} / {{ dev.rack_name }}</span>
+                </div>
+              </button>
+            </template>
+            <template v-if="searchGuests.length">
+              <div class="search-group-title">虚拟机</div>
+              <button
+                v-for="g in searchGuests"
+                :key="`vm-${g.connection_id}-${g.vmid}`"
+                type="button"
+                class="search-result-item"
+                @click="onSearchSelectGuest(g)"
+              >
+                <div class="search-result-main">
+                  <span class="status-dot" :class="guestStatusClass(g.status)" />
+                  <span class="search-result-name">{{ g.name }}</span>
+                  <el-tag size="small" type="success">VM</el-tag>
+                </div>
+                <div class="search-result-meta">
+                  <span>{{ g.ip_address || g.last_known_ip || '-' }}</span>
+                  <span class="search-result-path"
+                    >{{ g.connection_name }}<template v-if="g.node"> / {{ g.node }}</template></span
+                  >
+                </div>
+              </button>
+            </template>
           </div>
-          <div v-else-if="searchQuery" class="search-empty"><span>未找到匹配设备</span></div>
-          <div v-else class="search-empty"><span>输入设备名称或 IP 地址搜索</span></div>
+          <div v-else-if="searchQuery" class="search-empty"><span>未找到匹配的设备或虚拟机</span></div>
+          <div v-else class="search-empty"><span>输入名称或 IP 地址，同时搜索设备与虚拟机</span></div>
         </el-popover>
       </div>
       <div class="top-bar-right">
@@ -52,32 +105,72 @@
 
     <!-- Main Content -->
     <div class="main-content">
-      <aside class="left-sidebar" :style="{ width: sidebarCollapsed ? 'var(--dcn-sidebar-collapsed-width)' : 'var(--dcn-sidebar-width)' }">
-        <NavTree :active-panel="activePanel" :collapsed="sidebarCollapsed" @nav-panel="onNavPanel" @toggle-collapse="sidebarCollapsed = !sidebarCollapsed" />
+      <aside
+        class="left-sidebar"
+        :style="{ width: sidebarCollapsed ? 'var(--dcn-sidebar-collapsed-width)' : 'var(--dcn-sidebar-width)' }"
+      >
+        <NavTree
+          :active-panel="activeNavKey"
+          :collapsed="sidebarCollapsed"
+          @nav-panel="onNavPanel"
+          @toggle-collapse="sidebarCollapsed = !sidebarCollapsed"
+        />
       </aside>
 
       <main class="center-area">
-        <HomePanel v-if="activePanel === 'home'" :rooms="roomStore.rooms" @select-room="onSelectRoom" />
-        <RoomsPanel v-else-if="activePanel === 'rooms'" :rooms="roomStore.rooms" @select-room="onSelectRoom" @created="roomStore.fetchRooms" />
-        <Scene2D v-else-if="activePanel === 'scene'" ref="sceneRef" @device-click="onDeviceClick" @data-changed="onDataChanged" @nav-change="onNavChange" />
-        <CredentialPanel v-else-if="activePanel === 'credentials'" @data-changed="onDataChanged" />
-        <AuditPanel v-else-if="activePanel === 'audit'" v-model="auditTab" :audit-users="auditUsers" @open-replay="onOpenReplay" />
-        <UserManagePanel v-else-if="activePanel === 'users'" :initial-tab="usersTab" @tab-change="onUsersTabChange" />
-        <ScriptPanel v-else-if="activePanel === 'scripts'" />
-        <InspectionPanel v-else-if="activePanel === 'inspection'" />
+        <HomePanel v-if="activePanel === 'home'" @navigate="onNavPanel" />
+        <MetricsPanel v-else-if="activePanel === 'metrics'" />
+        <RoomsPanel
+          v-else-if="activePanel === 'rooms'"
+          :rooms="roomStore.rooms"
+          @select-room="onSelectRoom"
+          @created="roomStore.fetchRooms"
+        />
+        <ContainersPanel v-else-if="activePanel === 'containers'" />
+        <PvePanel v-else-if="activePanel === 'pve'" :focus-guest="pveFocus" @focused="pveFocus = null" />
+        <BusinessPanel v-else-if="activePanel === 'business'" />
+        <AlertCenter v-else-if="activePanel === 'alerts'" />
+        <Scene2D
+          v-else-if="activePanel === 'scene'"
+          ref="sceneRef"
+          @device-click="onDeviceClick"
+          @data-changed="onDataChanged"
+          @nav-change="onNavChange"
+        />
+        <SystemPanel
+          v-else-if="activePanel === 'system'"
+          :initial-users-tab="usersTab"
+          :tab="systemTab"
+          @users-tab-change="onUsersTabChange"
+        />
+        <AutomationPanel v-else-if="activePanel === 'automation'" :tab="automationTab" />
       </main>
 
       <aside v-if="activePanel === 'scene'" class="right-sidebar">
-        <DeviceDetail @connect-ssh="openTerminal('ssh')" @connect-rdp="openTerminal('rdp')" />
+        <DeviceDetail
+          @connect-ssh="openTerminal('ssh')"
+          @connect-rdp="openTerminal('rdp')"
+          @open-metrics="onOpenMetrics"
+        />
       </aside>
     </div>
 
     <!-- Credential Dialog (for terminal connections) -->
-    <el-dialog v-model="credDialog.visible" :title="credDialog.connType === 'ssh' ? 'SSH 连接凭据' : 'RDP 连接凭据'" width="420px" :close-on-click-modal="false" @closed="onCredDialogClosed">
+    <el-dialog
+      v-model="credDialog.visible"
+      :title="credDialog.connType === 'ssh' ? 'SSH 连接凭据' : 'RDP 连接凭据'"
+      width="420px"
+      :close-on-click-modal="false"
+      @closed="onCredDialogClosed"
+    >
       <el-form label-width="90px" @submit.prevent="submitCredentials">
         <el-form-item label="目标主机"><el-input :value="credDialog.deviceIp" disabled /></el-form-item>
-        <el-form-item label="用户名"><el-input v-model="credDialog.username" placeholder="请输入用户名" ref="credUsernameRef" /></el-form-item>
-        <el-form-item label="密码"><el-input v-model="credDialog.password" type="password" show-password placeholder="请输入密码" /></el-form-item>
+        <el-form-item label="用户名"
+          ><el-input ref="credUsernameRef" v-model="credDialog.username" placeholder="请输入用户名"
+        /></el-form-item>
+        <el-form-item label="密码"
+          ><el-input v-model="credDialog.password" type="password" show-password placeholder="请输入密码"
+        /></el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="credDialog.visible = false">取消</el-button>
@@ -85,15 +178,26 @@
       </template>
     </el-dialog>
 
-    <!-- Replay Modal -->
-    <ReplayModal ref="replayModalRef" />
-
     <!-- Change Password Dialog -->
     <el-dialog v-model="changePasswordVisible" title="修改密码" width="400px" :close-on-click-modal="false">
       <el-form label-width="80px" @submit.prevent="submitChangePassword">
-        <el-form-item label="原密码"><el-input v-model="changePasswordForm.oldPassword" type="password" show-password placeholder="请输入原密码" /></el-form-item>
-        <el-form-item label="新密码"><el-input v-model="changePasswordForm.newPassword" type="password" show-password placeholder="请输入新密码（至少6位）" /></el-form-item>
-        <el-form-item label="确认密码"><el-input v-model="changePasswordForm.confirmPassword" type="password" show-password placeholder="再次输入新密码" /></el-form-item>
+        <el-form-item label="原密码"
+          ><el-input v-model="changePasswordForm.oldPassword" type="password" show-password placeholder="请输入原密码"
+        /></el-form-item>
+        <el-form-item label="新密码"
+          ><el-input
+            v-model="changePasswordForm.newPassword"
+            type="password"
+            show-password
+            placeholder="至少8位，包含至少3类字符"
+        /></el-form-item>
+        <el-form-item label="确认密码"
+          ><el-input
+            v-model="changePasswordForm.confirmPassword"
+            type="password"
+            show-password
+            placeholder="再次输入新密码"
+        /></el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="changePasswordVisible = false">取消</el-button>
@@ -104,27 +208,30 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { Monitor, UserFilled, SwitchButton, Search, Lock } from '@element-plus/icons-vue'
+import { Monitor, UserFilled, SwitchButton, Lock } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { useDeviceStore } from '@/stores/device'
 import { useRoomStore } from '@/stores/room'
+import { deviceTypeLabel } from '@/utils/deviceLabels'
 import NavTree from '@/components/panel/NavTree.vue'
-import HomePanel from '@/components/panel/HomePanel.vue'
-import RoomsPanel from '@/components/panel/RoomsPanel.vue'
-import DeviceDetail from '@/components/panel/DeviceDetail.vue'
-import Scene2D from '@/components/scene/Scene2D.vue'
-import CredentialPanel from '@/components/panel/CredentialPanel.vue'
-import AuditPanel from '@/components/panel/AuditPanel.vue'
-import UserManagePanel from '@/components/panel/UserManagePanel.vue'
-import ScriptPanel from '@/components/panel/ScriptPanel.vue'
-import InspectionPanel from '@/components/panel/InspectionPanel.vue'
-import ReplayModal from '@/components/panel/ReplayModal.vue'
+const HomePanel = defineAsyncComponent(() => import('@/components/panel/HomePanel.vue'))
+const MetricsPanel = defineAsyncComponent(() => import('@/components/panel/MetricsPanel.vue'))
+const RoomsPanel = defineAsyncComponent(() => import('@/components/panel/RoomsPanel.vue'))
+const DeviceDetail = defineAsyncComponent(() => import('@/components/panel/DeviceDetail.vue'))
+const Scene2D = defineAsyncComponent(() => import('@/components/scene/Scene2D.vue'))
+const SystemPanel = defineAsyncComponent(() => import('@/components/panel/SystemPanel.vue'))
+const AutomationPanel = defineAsyncComponent(() => import('@/components/panel/AutomationPanel.vue'))
+const ContainersPanel = defineAsyncComponent(() => import('@/components/panel/ContainersPanel.vue'))
+const BusinessPanel = defineAsyncComponent(() => import('@/components/panel/BusinessPanel.vue'))
+const AlertCenter = defineAsyncComponent(() => import('@/components/panel/AlertCenter.vue'))
+const PvePanel = defineAsyncComponent(() => import('@/components/panel/PvePanel.vue'))
 import { useDeviceMonitor } from '@/composables/useDeviceMonitor'
-import { auditAPI, authAPI } from '@/api'
+import { authAPI, searchAPI } from '@/api'
 import { ElMessage } from 'element-plus'
 import type { Room, Device } from '@/types'
+import type { SearchDeviceItem, SearchGuestItem } from '@/types/search'
 
 const router = useRouter()
 const route = useRoute()
@@ -134,87 +241,166 @@ const roomStore = useRoomStore()
 const deviceMonitor = useDeviceMonitor()
 
 const sceneRef = ref<InstanceType<typeof Scene2D>>()
-const replayModalRef = ref<InstanceType<typeof ReplayModal>>()
 
 // ---- Sidebar collapse ----
 const sidebarCollapsed = ref(false)
 
 // ---- Panel routing ----
+// 侧边栏子项为复合键(面板:页签),两个面板的激活页签在此持有
+// 直接进入“自动化运维”时应展示运维概览；只有旧入口显式携带
+// agent/scripts/inspection 页签时，才由 AutomationPanel 切到新建任务。
+const automationTab = ref('overview')
+const systemTab = ref('overview')
+
 const _initPanel = (() => {
   const p = route.query.panel as string | undefined
-  if (p && p !== 'scene') return p
+  const t = route.query.tab as string | undefined
+  // 旧入口映射:scripts/inspection → 自动化执行对应页签;users → 系统管理
+  if (p === 'scripts') {
+    automationTab.value = 'scripts'
+    return 'automation'
+  }
+  if (p === 'inspection') {
+    automationTab.value = 'inspection'
+    return 'automation'
+  }
+  if (p === 'users') {
+    systemTab.value = 'users'
+    return 'system'
+  }
+  if (p === 'credentials') return 'rooms'
+  if (p === 'automation') {
+    if (t && ['agent', 'scripts', 'inspection'].includes(t)) automationTab.value = t
+    return 'automation'
+  }
+  if (p === 'system') {
+    systemTab.value = t === 'agent' ? 'agent' : t === 'webhooks' ? 'webhooks' : t === 'users' ? 'users' : 'overview'
+    return 'system'
+  }
+  if (p && ['home', 'metrics', 'rooms', 'containers', 'pve', 'business', 'alerts', 'scene'].includes(p)) return p
   if (route.query.room) return 'scene'
   return 'home'
 })()
 const activePanel = ref<string>(_initPanel)
 
-const _initAuditTab = (() => {
-  const t = route.query.tab as string | undefined
-  if (t && ['settings', 'logs', 'recordings', 'scripts', 'logins'].includes(t)) return t
-  return 'settings'
-})()
-const auditTab = ref(_initAuditTab)
+// 传给 NavTree 的激活键:子项为 面板:页签,普通项为面板名
+const activeNavKey = computed(() => {
+  if (activePanel.value === 'automation') return 'automation'
+  if (activePanel.value === 'system') return 'system'
+  return activePanel.value
+})
 
 const _initUsersTab = (() => {
   const t = route.query.tab as string | undefined
-  if (t && ['users', 'roles', 'groups'].includes(t)) return t
+  if (t && ['users', 'roles'].includes(t)) return t
   return 'users'
 })()
 const usersTab = ref(_initUsersTab)
 
-// ---- Audit users (shared across audit tabs) ----
-const auditUsers = ref<string[]>([])
-async function loadAuditUsers() {
-  try { auditUsers.value = (await auditAPI.listAuditUsers()).data } catch { /* ignore */ }
-}
-
-// ---- Device search ----
+// ---- Global search（设备 + PVE 虚拟机）----
+// 旧实现只遍历 roomStore 的机房/机柜/设备树，虚机永远搜不到；现在改为
+// 防抖调后端 /api/search（ACL/权限在服务端收口），结果分「设备/虚拟机」两组。
 const searchQuery = ref('')
 const searchVisible = ref(false)
-const searchResults = ref<{ device: Device; roomId: number; roomName: string; rackId: number; rackName: string }[]>([])
+const searchLoading = ref(false)
+const searchDevices = ref<SearchDeviceItem[]>([])
+const searchGuests = ref<SearchGuestItem[]>([])
+// 顶栏搜索选中虚机后定位到 PvePanel（切连接 + 打开详情抽屉）
+const pveFocus = ref<{ connectionId: number; vmid: number } | null>(null)
+let searchTimer: number | undefined
+let searchSeq = 0
 
-function onSearchInput() {
-  const q = searchQuery.value.trim().toLowerCase()
-  if (!q) { searchResults.value = []; return }
-  const results: typeof searchResults.value = []
-  for (const room of roomStore.rooms) {
-    for (const rack of room.racks ?? []) {
-      for (const dev of rack.devices ?? []) {
-        if (dev.name.toLowerCase().includes(q) || dev.ip_address?.toLowerCase().includes(q)) {
-          results.push({ device: dev, roomId: room.id, roomName: room.name, rackId: rack.id, rackName: rack.name })
-        }
-      }
-    }
+function resetSearch() {
+  searchQuery.value = ''
+  searchDevices.value = []
+  searchGuests.value = []
+  searchLoading.value = false
+  if (searchTimer) {
+    window.clearTimeout(searchTimer)
+    searchTimer = undefined
   }
-  searchResults.value = results.slice(0, 20)
 }
 
-async function onSearchSelect(item: typeof searchResults.value[0]) {
+function onSearchInput() {
+  if (searchTimer) window.clearTimeout(searchTimer)
+  const q = searchQuery.value.trim()
+  if (!q) {
+    searchDevices.value = []
+    searchGuests.value = []
+    searchLoading.value = false
+    return
+  }
+  searchTimer = window.setTimeout(() => void runSearch(q), 300)
+}
+
+async function runSearch(q: string) {
+  // 序号守卫：快速输入时只采纳最后一次请求的结果
+  const seq = ++searchSeq
+  searchLoading.value = true
+  try {
+    const res = await searchAPI.global(q)
+    if (seq !== searchSeq) return
+    searchDevices.value = res.data.devices
+    searchGuests.value = res.data.guests
+  } catch {
+    if (seq === searchSeq) {
+      searchDevices.value = []
+      searchGuests.value = []
+    }
+  } finally {
+    if (seq === searchSeq) searchLoading.value = false
+  }
+}
+
+async function onSearchSelectDevice(dev: SearchDeviceItem) {
   searchVisible.value = false
-  searchQuery.value = ''
-  const room = roomStore.rooms.find(r => r.id === item.roomId)
+  resetSearch()
+  // 旧实现不切面板：从非 scene 面板搜索选中设备时 sceneRef 为空，
+  // openRackById 静默失败；现在统一切到机房 2D 场景再定位。
+  activePanel.value = 'scene'
+  let room = roomStore.rooms.find((r) => r.id === dev.room_id)
+  if (!room) {
+    await roomStore.fetchRooms()
+    room = roomStore.rooms.find((r) => r.id === dev.room_id)
+  }
   if (room) roomStore.setCurrentRoom(room)
   await nextTick()
-  sceneRef.value?.openRackById(item.rackId)
+  sceneRef.value?.openRackById(dev.rack_id)
+  router.replace({
+    path: '/',
+    query: { panel: 'scene', room: String(dev.room_id), rack: String(dev.rack_id), device: String(dev.id) },
+  })
   await nextTick()
-  deviceStore.setCurrentDevice(item.device)
+  const full = room?.racks?.flatMap((r) => r.devices ?? []).find((d) => d.id === dev.id)
+  if (full) deviceStore.setCurrentDevice(full)
+}
+
+function onSearchSelectGuest(g: SearchGuestItem) {
+  searchVisible.value = false
+  resetSearch()
+  onNavPanel('pve')
+  pveFocus.value = { connectionId: g.connection_id, vmid: g.vmid }
+}
+
+function guestStatusClass(status: string): string {
+  return status === 'running' ? 'dot-online' : 'dot-offline'
 }
 
 function statusDotClass(status: string): string {
   const s = status?.toLowerCase()
   if (s === 'online') return 'dot-online'
   if (s === 'offline') return 'dot-offline'
-  return 'dot-maintenance'
-}
-
-function deviceTypeLabel(type: string): string {
-  const map: Record<string, string> = { server: '服务器', switch: '交换机', router: '路由器', firewall: '防火墙', host: '主机' }
-  return map[type?.toLowerCase()] ?? type
+  return 'dot-offline'
 }
 
 function deviceTypeTagType(type: string): string {
-  const map: Record<string, string> = { server: 'info', switch: 'primary', router: 'success', firewall: 'danger', host: 'info' }
-  return map[type?.toLowerCase()] ?? 'info'
+  const map: Record<string, string> = {
+    server: 'info',
+    cloud_server: 'primary',
+    host: 'info',
+  }
+  const key = type?.toLowerCase()
+  return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : 'info'
 }
 
 // ---- Navigation ----
@@ -226,19 +412,17 @@ function onNavChange(state: { roomId?: number; rackId?: number; deviceId?: numbe
   router.replace({ path: '/', query })
 }
 
-function onNavPanel(panel: string) {
+function onNavPanel(raw: string) {
+  // 复合键(面板:页签)拆解开,面板切换 + 页签定位
+  const [panel, tab] = raw.split(':')
   activePanel.value = panel
+  if (panel === 'automation') automationTab.value = tab || 'overview'
+  if (panel === 'system' && tab) systemTab.value = tab
   if (panel === 'scene') return
   roomStore.setCurrentRoom(null)
-  if (panel === 'home') {
-    router.replace({ path: '/', query: { panel: 'home' } })
-  } else if (panel === 'audit') {
-    router.replace({ path: '/', query: { panel: 'audit', tab: auditTab.value } })
-  } else if (panel === 'users') {
-    router.replace({ path: '/', query: { panel: 'users', tab: usersTab.value } })
-  } else {
-    router.replace({ path: '/', query: { panel } })
-  }
+  const query: Record<string, string> = { panel }
+  if (tab) query.tab = tab
+  router.replace({ path: '/', query })
 }
 
 function onSelectRoom(room: Room) {
@@ -247,17 +431,43 @@ function onSelectRoom(room: Room) {
   router.replace({ path: '/', query: { panel: 'scene', room: String(room.id) } })
 }
 
-function onDeviceClick(payload: { device: Device }) { deviceStore.setCurrentDevice(payload.device) }
-function onDataChanged() { roomStore.fetchRooms() }
+function onDeviceClick(payload: { device: Device }) {
+  deviceStore.setCurrentDevice(payload.device)
+}
+function onDataChanged() {
+  roomStore.fetchRooms()
+}
+
+// U 位图详情面板的"监控详情"——切到服务器监控面板并带上设备 id(自动开抽屉)。
+// 先更新 URL 再切面板,保证 MetricsPanel 挂载时能读到 device 参数。
+async function onOpenMetrics(deviceId: number) {
+  roomStore.setCurrentRoom(null)
+  await router.replace({ path: '/', query: { panel: 'metrics', device: String(deviceId) } })
+  activePanel.value = 'metrics'
+}
 
 // ---- Terminal credential dialog ----
-const credDialog = reactive({ visible: false, connType: 'ssh' as 'ssh' | 'rdp', deviceId: 0, deviceIp: '', rackId: 0, username: '', password: '' })
-const credUsernameRef = ref<InstanceType<typeof import('element-plus')['ElInput']>>()
+const credDialog = reactive({
+  visible: false,
+  connType: 'ssh' as 'ssh' | 'rdp',
+  deviceId: 0,
+  deviceIp: '',
+  rackId: 0,
+  username: '',
+  password: '',
+})
+const credUsernameRef = ref<InstanceType<(typeof import('element-plus'))['ElInput']>>()
 
 function openTerminal(type: 'ssh' | 'rdp') {
   const device = deviceStore.currentDevice
   if (!device) return
-  if (device.credential_id) { openTerminalWithCredential(device, type); return }
+  // Device credentials are now stored directly on the device. Older records
+  // may still expose a legacy credential_id, but the reliable flag is
+  // has_credential; the backend resolves the encrypted secret server-side.
+  if (device.has_credential || !!device.credential_username) {
+    openTerminalWithCredential(device, type)
+    return
+  }
   credDialog.connType = type
   credDialog.deviceId = device.id
   credDialog.deviceIp = device.ip_address || ''
@@ -265,11 +475,20 @@ function openTerminal(type: 'ssh' | 'rdp') {
   credDialog.username = type === 'ssh' ? 'root' : ''
   credDialog.password = ''
   credDialog.visible = true
-  nextTick(() => { credUsernameRef.value?.focus() })
+  nextTick(() => {
+    credUsernameRef.value?.focus()
+  })
 }
 
 function openTerminalWithCredential(device: Device, connType: 'ssh' | 'rdp') {
-  const query = new URLSearchParams({ deviceId: String(device.id), connType, deviceIp: device.ip_address || '', credentialId: String(device.credential_id), rackId: String(device.rack_id) }).toString()
+  const params = new URLSearchParams({
+    deviceId: String(device.id),
+    connType,
+    deviceIp: device.ip_address || '',
+    rackId: String(device.rack_id),
+  })
+  if (device.credential_id) params.set('credentialId', String(device.credential_id))
+  const query = params.toString()
   window.open(`${router.resolve({ name: 'terminal' }).path}?${query}`, '_blank')
 }
 
@@ -300,23 +519,15 @@ function submitCredentials() {
   }
 }
 
-function onCredDialogClosed() { credDialog.username = ''; credDialog.password = '' }
-
-// ---- Replay ----
-function onOpenReplay(row: any) { replayModalRef.value?.open(row) }
+function onCredDialogClosed() {
+  credDialog.username = ''
+  credDialog.password = ''
+}
 
 // ---- Watchers ----
-watch(activePanel, (val) => {
-  if (val === 'audit') loadAuditUsers()
-})
-
-watch(auditTab, (val) => {
-  if (activePanel.value === 'audit') router.replace({ path: '/', query: { panel: 'audit', tab: val } })
-})
-
 function onUsersTabChange(tab: string) {
   usersTab.value = tab
-  if (activePanel.value === 'users') router.replace({ path: '/', query: { panel: 'users', tab } })
+  if (activePanel.value === 'system') router.replace({ path: '/', query: { panel: 'system', tab } })
 }
 
 // ---- Lifecycle ----
@@ -330,17 +541,27 @@ onMounted(async () => {
     const rackId = route.query.rack ? Number(route.query.rack) : null
     const deviceId = route.query.device ? Number(route.query.device) : null
     if (roomId && !isNaN(roomId)) {
-      const room = roomStore.rooms.find(r => r.id === roomId)
+      const room = roomStore.rooms.find((r) => r.id === roomId)
       if (room) {
         roomStore.setCurrentRoom(room)
-        if (rackId) { await nextTick(); sceneRef.value?.openRackById(rackId) }
-        if (deviceId) { await nextTick(); const dev = room.racks?.flatMap(r => r.devices ?? []).find(d => d.id === deviceId); if (dev) deviceStore.setCurrentDevice(dev) }
+        if (rackId) {
+          await nextTick()
+          sceneRef.value?.openRackById(rackId)
+        }
+        if (deviceId) {
+          await nextTick()
+          const dev = room.racks?.flatMap((r) => r.devices ?? []).find((d) => d.id === deviceId)
+          if (dev) deviceStore.setCurrentDevice(dev)
+        }
       }
     }
   }
 })
 
-onUnmounted(() => { deviceMonitor.stop() })
+onUnmounted(() => {
+  deviceMonitor.stop()
+  if (searchTimer) window.clearTimeout(searchTimer)
+})
 
 // ---- User dropdown ----
 const changePasswordVisible = ref(false)
@@ -377,56 +598,236 @@ async function submitChangePassword() {
   }
 }
 
-async function handleLogout() { await authStore.logout(); router.push('/login') }
+async function handleLogout() {
+  await authStore.logout()
+  router.push('/login')
+}
 </script>
 
 <style scoped>
 /* Layout-level CSS only: dashboard shell, top-bar, sidebars, search */
-.dashboard { display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--dcn-bg-page); }
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--dcn-bg-page);
+}
 
 .top-bar {
-  display: flex; align-items: center; justify-content: space-between;
-  height: var(--dcn-topbar-height); padding: 0 var(--dcn-space-4);
-  background: var(--dcn-topbar-bg); color: var(--dcn-text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--dcn-topbar-height);
+  padding: 0 var(--dcn-space-4);
+  background: var(--dcn-topbar-bg);
+  color: var(--dcn-text-primary);
   flex-shrink: 0;
   border-bottom: 1px solid var(--dcn-topbar-border);
-  position: relative; z-index: 20;
+  position: relative;
+  z-index: 20;
+  backdrop-filter: blur(14px);
 }
 
-.top-bar-left { display: flex; align-items: center; gap: var(--dcn-space-3); }
-.top-bar-title { font-size: var(--dcn-text-lg); font-weight: 600; letter-spacing: -0.01em; color: var(--dcn-text-primary); }
-.top-bar-right { display: flex; align-items: center; gap: var(--dcn-space-2); flex-shrink: 0; }
-.top-bar-center { flex: 1; display: flex; justify-content: center; padding: 0 var(--dcn-space-4); }
-.search-input { max-width: 360px; width: 100%; }
-.search-input :deep(.el-input__wrapper) { background: rgba(11, 11, 17, 0.4); border: 1px solid var(--dcn-border); border-radius: var(--dcn-radius-md); box-shadow: none; transition: all var(--dcn-transition-fast); }
-.search-input :deep(.el-input__wrapper:hover), .search-input :deep(.el-input__wrapper.is-focus) { background: rgba(11, 11, 17, 0.6); border-color: var(--dcn-border-strong); }
-.search-input :deep(.el-input__inner) { color: var(--dcn-text-primary); }
-.search-input :deep(.el-input__inner::placeholder) { color: var(--dcn-text-placeholder); }
-.search-input :deep(.el-icon) { color: var(--dcn-text-placeholder); }
-.search-results { max-height: 360px; overflow-y: auto; }
-.search-result-item { display: flex; flex-direction: column; gap: var(--dcn-space-1); padding: 10px var(--dcn-space-3); cursor: pointer; border-radius: var(--dcn-radius-md); transition: background var(--dcn-transition-fast); }
-.search-result-item:hover { background: var(--dcn-sidebar-hover-bg); }
-.search-result-main { display: flex; align-items: center; gap: var(--dcn-space-2); }
-.search-result-name { font-size: var(--dcn-text-md); font-weight: 500; color: var(--dcn-text-primary); }
-.search-result-meta { display: flex; gap: var(--dcn-space-3); font-size: var(--dcn-text-sm); color: var(--dcn-text-secondary); padding-left: var(--dcn-space-4); }
-.search-result-path { color: var(--dcn-text-placeholder); }
-.search-empty { text-align: center; padding: var(--dcn-space-5); color: var(--dcn-text-secondary); font-size: var(--dcn-text-base); }
-.status-dot { width: 8px; height: 8px; border-radius: var(--dcn-radius-full); flex-shrink: 0; }
-.dot-online { background: var(--dcn-dot-online); }
-.dot-offline { background: var(--dcn-dot-offline); }
-.dot-maintenance { background: var(--dcn-dot-maintenance); }
+.top-bar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--dcn-space-3);
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  border-radius: var(--dcn-radius-lg);
+  background: linear-gradient(145deg, rgba(59, 130, 246, 0.28), rgba(37, 99, 235, 0.12));
+  color: var(--dcn-primary-light);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.05);
+}
+.brand-copy {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+.brand-copy small {
+  margin-top: 3px;
+  color: var(--dcn-text-placeholder);
+  font-size: 10px;
+  letter-spacing: 0.6px;
+}
+.top-bar-title {
+  font: 600 var(--dcn-text-lg) var(--dcn-font-mono);
+  letter-spacing: 0.12em;
+  color: var(--dcn-text-primary);
+}
+.top-bar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--dcn-space-2);
+  flex-shrink: 0;
+}
+.top-bar-center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  padding: 0 var(--dcn-space-4);
+}
+.search-input {
+  max-width: 440px;
+  width: 100%;
+}
+.search-input :deep(.el-input__wrapper) {
+  background: var(--dcn-input-bg);
+  border: 1px solid var(--dcn-border);
+  border-radius: var(--dcn-radius-md);
+  box-shadow: none;
+  transition: all var(--dcn-transition-fast);
+}
+.search-input :deep(.el-input__wrapper:hover),
+.search-input :deep(.el-input__wrapper.is-focus) {
+  background: var(--dcn-input-bg-hover);
+  border-color: var(--dcn-border-strong);
+}
+.search-input :deep(.el-input__inner) {
+  color: var(--dcn-text-primary);
+}
+.search-input :deep(.el-input__inner::placeholder) {
+  color: var(--dcn-text-placeholder);
+}
+.search-input :deep(.el-icon) {
+  color: var(--dcn-text-placeholder);
+}
+.search-results {
+  max-height: 360px;
+  overflow-y: auto;
+}
+.search-group-title {
+  padding: var(--dcn-space-2) var(--dcn-space-3) var(--dcn-space-1);
+  font-size: var(--dcn-text-xs);
+  color: var(--dcn-text-placeholder);
+  letter-spacing: 0.05em;
+}
+.search-result-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dcn-space-1);
+  width: 100%;
+  padding: 10px var(--dcn-space-3);
+  cursor: pointer;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  border-radius: var(--dcn-radius-md);
+  transition: background var(--dcn-transition-fast);
+  text-align: left;
+}
+.search-result-item:hover {
+  background: var(--dcn-sidebar-hover-bg);
+}
+.search-result-main {
+  display: flex;
+  align-items: center;
+  gap: var(--dcn-space-2);
+}
+.search-result-name {
+  font-size: var(--dcn-text-md);
+  font-weight: 500;
+  color: var(--dcn-text-primary);
+}
+.search-result-meta {
+  display: flex;
+  gap: var(--dcn-space-3);
+  font-size: var(--dcn-text-sm);
+  color: var(--dcn-text-secondary);
+  padding-left: var(--dcn-space-4);
+}
+.search-result-path {
+  color: var(--dcn-text-placeholder);
+}
+.search-empty {
+  text-align: center;
+  padding: var(--dcn-space-5);
+  color: var(--dcn-text-secondary);
+  font-size: var(--dcn-text-base);
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--dcn-radius-full);
+  flex-shrink: 0;
+}
+.dot-online {
+  background: var(--dcn-dot-online);
+}
+.dot-offline {
+  background: var(--dcn-dot-offline);
+}
+.dot-maintenance {
+  background: var(--dcn-dot-maintenance);
+}
 .user-avatar-btn {
-  display: flex; align-items: center; gap: var(--dcn-space-2);
+  display: flex;
+  align-items: center;
+  gap: var(--dcn-space-2);
+  min-height: 36px;
   padding: 4px var(--dcn-space-3) 4px var(--dcn-space-2);
-  border-radius: var(--dcn-radius-pill);
-  background: var(--dcn-primary-bg-deep);
-  cursor: pointer; transition: all var(--dcn-transition-fast); color: var(--dcn-primary-light);
+  border: 1px solid var(--dcn-border);
+  border-radius: var(--dcn-radius-lg);
+  background: var(--dcn-bg-section);
+  cursor: pointer;
+  transition: all var(--dcn-transition-fast);
+  color: var(--dcn-primary-light);
 }
-.user-avatar-btn:hover { background: var(--dcn-primary-bg); color: var(--dcn-primary); }
-.user-avatar-name { font-size: var(--dcn-text-sm); font-weight: 500; white-space: nowrap; }
+.user-avatar-btn:hover {
+  border-color: var(--dcn-border-strong);
+  background: var(--dcn-bg-muted);
+  color: var(--dcn-text-primary);
+}
+.user-avatar-name {
+  font-size: var(--dcn-text-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
 
-.main-content { display: flex; flex: 1; overflow: hidden; }
-.left-sidebar { flex-shrink: 0; background: var(--dcn-bg-card); border-right: 1px solid var(--dcn-border); overflow-y: auto; transition: width var(--dcn-transition-normal); }
-.center-area { flex: 1; overflow: hidden; position: relative; background: var(--dcn-bg-page); }
-.right-sidebar { width: var(--dcn-detail-width); flex-shrink: 0; background: var(--dcn-bg-card); border-left: 1px solid var(--dcn-border); overflow-y: auto; }
+.main-content {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+.left-sidebar {
+  flex-shrink: 0;
+  background: var(--dcn-bg-section);
+  border-right: 1px solid var(--dcn-border-light);
+  overflow-y: auto;
+  transition: width var(--dcn-transition-normal);
+}
+.center-area {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  background: var(--dcn-bg-page);
+}
+.right-sidebar {
+  width: var(--dcn-detail-width);
+  flex-shrink: 0;
+  background: var(--dcn-bg-section);
+  border-left: 1px solid var(--dcn-border-light);
+  overflow-y: auto;
+}
+
+@media (max-width: 900px) {
+  .brand-copy small {
+    display: none;
+  }
+  .top-bar-center {
+    padding: 0 var(--dcn-space-2);
+  }
+  .search-input {
+    max-width: 320px;
+  }
+  .user-avatar-name {
+    display: none;
+  }
+}
 </style>

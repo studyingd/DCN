@@ -18,12 +18,13 @@ export interface InspectionItemResult {
 
 export interface InspectionRecord {
   id: number
-  device_id: number
+  // PVE 虚拟机巡检记录 device_id 为 NULL(迁移 0036)
+  device_id: number | null
   device_name: string
   device_ip: string | null
-  target_type: 'network' | 'linux' | 'windows'
-  vendor: string | null
-  mode: 'standard' | 'custom' | 'quick'
+  target_type: 'linux' | 'windows'
+  // core：自动化运维的健康巡检固定使用的模式，检查项由后端按操作系统自动决定
+  mode: 'standard' | 'custom' | 'quick' | 'core'
   status: 'running' | 'completed' | 'failed' | 'partial'
   total_items: number
   normal_count: number
@@ -49,7 +50,7 @@ export interface InspectionDeviceItem {
   status: string
   os_system: string | null
   credential_id: number | null
-  target_type: 'network' | 'linux' | 'windows'
+  target_type: 'linux' | 'windows'
 }
 
 export interface InspectionItemInfo {
@@ -66,7 +67,6 @@ export interface InspectionRunRequest {
   username?: string
   password?: string
   credential_id?: number
-  enable_password?: string
 }
 
 export interface InspectionRunResult {
@@ -78,11 +78,11 @@ export interface InspectionRunResult {
 }
 
 export interface InspectionDeviceResult {
-  device_id: number
+  // PVE 虚拟机巡检记录 device_id 为 NULL(迁移 0036)
+  device_id: number | null
   device_name: string
   ip_address: string | null
   target_type: string
-  vendor: string | null
   record_id?: number
   status: string
   total_items: number
@@ -119,4 +119,20 @@ export interface InspectionReport {
     critical: number
     error: number
   }>
+}
+
+// ── 阈值表 ──
+// 由 GET /api/inspection/thresholds 下发(权限 device:view),key 是巡检项 item_type
+// (cpu / memory / disk / failed_services …),不是指标名 cpu_pct / mem_pct,映射由前端负责。
+
+/** 单个巡检项的告警 / 严重阈值,边界一律按 >= 判定 */
+export interface MetricThreshold {
+  warning: number
+  critical: number
+}
+
+export type MetricThresholdTable = Record<string, MetricThreshold>
+
+export interface MetricThresholdsResponse {
+  items: MetricThresholdTable
 }

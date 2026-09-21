@@ -1,25 +1,34 @@
+import logging
 import warnings
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from app import config
+
+logger = logging.getLogger(__name__)
 
 
-def utcnow() -> datetime:
-    """Naive UTC 'now'.
+def as_utc_aware(dt: datetime | None) -> datetime | None:
+    """Normalize a DB datetime to an aware UTC value.
 
-    The DB connection is pinned to UTC (``SET time_zone='+00:00'``) and tzinfo is
-    stripped on write, so datetimes read back from the DB are naive-but-UTC.
-    Use this helper instead of ``datetime.now()`` (local) when computing values
-    that will be compared against DB-read datetimes, so both sides are naive UTC.
+    ORM datetime columns go through ``app.database.UTCDateTime`` and are already
+    aware UTC.  This is for the values that bypass it — raw SQL rows, in-memory
+    snapshots, and client-supplied timestamps without an offset — which are all
+    treated as UTC, matching the UTC-pinned DB connection.
     """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def utc_isoformat(dt: datetime | None) -> str | None:
     """Serialize a datetime to ISO 8601 with explicit UTC timezone.
 
-    SQLite strips timezone info on storage, so datetimes read back from the DB
-    are naive. This helper ensures every serialized timestamp carries a 'Z'
-    suffix so that JavaScript (and other clients) correctly interpret it as UTC.
+    MySQL connections are pinned to UTC. Legacy rows without timezone metadata
+    are treated as UTC so clients receive an explicit ``Z`` suffix.
 
     Warns when a naive datetime is passed to help catch incorrect datetime
     construction (use datetime.now(timezone.utc) instead of datetime.now()).
@@ -37,6 +46,50 @@ def utc_isoformat(dt: datetime | None) -> str | None:
     if dt.tzinfo is None:
         return s + "Z"
     return s
+
+
+def display_timezone() -> tzinfo:
+    """Timezone used when rendering timestamps for humans.
+
+    Notifications (Feishu cards, Bitable fields, webhook text) are read by
+    operators, so naive-UTC values from the DB must be shifted out of UTC.
+    Defaults to ``Asia/Shanghai``; set ``DISPLAY_TIMEZONE`` to override, or to
+    an empty string to follow the server's system timezone.  An unknown name
+    falls back to system local time instead of breaking delivery.
+    """
+    name = (config.DISPLAY_TIMEZONE or "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            logger.warning("DISPLAY_TIMEZONE=%r 无效，改用服务器系统时区", name)
+    return datetime.now(timezone.utc).astimezone().tzinfo
+
+
+def format_local_time(value: Any, fmt: str = "%Y/%m/%d %H:%M") -> str:
+    """Render a timestamp in :func:`display_timezone` for human consumption.
+
+    Accepts a ``datetime`` or an ISO-8601 string.  Values without timezone
+    metadata are interpreted as UTC — MySQL ``DATETIME`` columns lose tzinfo on
+    the way back out for anything that bypasses ``UTCDateTime``, so treating
+    them as local time would display times hours off.  Empty input renders
+    "now"; anything unparseable is returned unchanged so no information is
+    silently dropped.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            parsed = datetime.now(timezone.utc)
+        else:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(display_timezone()).strftime(fmt)
 
 
 # ── Control-character sanitization (log-injection defense) ───────────

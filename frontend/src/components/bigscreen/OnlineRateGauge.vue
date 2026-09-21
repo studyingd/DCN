@@ -19,9 +19,9 @@ const rate = computed(() => {
 })
 
 const gaugeColor = computed(() => {
-  if (rate.value >= 90) return '#00ff88'
-  if (rate.value >= 70) return '#ffcc00'
-  return '#ff4d6a'
+  if (rate.value >= 90) return '#22c55e'
+  if (rate.value >= 70) return '#d97706'
+  return '#f05252'
 })
 
 const chartOption = computed(() => ({
@@ -39,9 +39,9 @@ const chartOption = computed(() => ({
         lineStyle: {
           width: 12,
           color: [
-            [0.7, '#ff4d6a'],
-            [0.9, '#ffcc00'],
-            [1, '#00ff88'],
+            [0.7, '#f05252'],
+            [0.9, '#d97706'],
+            [1, '#22c55e'],
           ],
         },
       },

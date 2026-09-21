@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database import Base
+from app.database import Base, UTCDateTime
 
 
 class Role(Base):
@@ -18,10 +18,13 @@ class Role(Base):
     # System administrator flag — implicit full permissions + device scope.
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime | None] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        UTCDateTime, default=lambda: datetime.now(timezone.utc)
     )
 
     users: Mapped[list["User"]] = relationship("User", back_populates="role_ref")  # type: ignore[name-defined]
     device_access: Mapped[list["RoleDeviceAccess"]] = relationship(  # type: ignore[name-defined]
         "RoleDeviceAccess", back_populates="role", cascade="all, delete-orphan"
+    )
+    pve_guest_access: Mapped[list["RolePveGuestAccess"]] = relationship(  # type: ignore[name-defined]
+        "RolePveGuestAccess", back_populates="role", cascade="all, delete-orphan"
     )

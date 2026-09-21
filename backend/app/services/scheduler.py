@@ -1,193 +1,166 @@
-"""Background scheduler for scheduled script tasks."""
+"""Background scheduler for unified automation schedules.
+
+旧 ScheduledTask(脚本专用定时任务)链路已删除:它与新 AutomationSchedule
+并存造成双入口分裂——旧计划的执行结果不落统一任务表(无 steps 审计)、
+不支持 PVE 虚拟机、没有 Webhook 巡检报告。合并后定时计划唯一入口是
+/api/automation/schedules,到期统一 create_job_record 走自动化执行引擎。
+
+paused 语义(用户主动暂停,随时恢复)与 disabled(授权失效系统停用,
+需排查后重建)严格分开:到期扫描只认 active,paused 的 next_run_at
+保持不动,恢复时按周期继续。
+"""
 
 import asyncio
-import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from app.database import SessionLocal
-from app.models.audit_log import AuditLog
-from app.models.device import Device
-from app.models.scheduled_task import ScheduledTask
+from app.models.automation import AutomationSchedule
+from app.models.user import User
+from app.services.automation import create_job_record, start_automation_job
 from app.services.cron import next_cron_time
-from app.utils import utcnow
-from app.validators import validate_script_command
+from app.services.permissions import user_can_access_device, user_has_permission
 
 logger = logging.getLogger(__name__)
 
 SCHEDULER_INTERVAL = 30
-MAX_CONCURRENT_SSH = 10
-
-
-def _execute_task(task: ScheduledTask):
-    """Execute a scheduled task on its target devices (runs in thread pool)."""
-    db = SessionLocal()
-    try:
-        devices = db.query(Device).filter(Device.id.in_(task.device_ids)).all()
-        if not devices:
-            logger.warning("Scheduled task %d: no devices found", task.id)
-            return
-
-        # Re-check the command at run time (policy may have tightened, or the
-        # task predates the blocklist). Skip + audit if it is now blocked.
-        try:
-            validate_script_command(task.command)
-        except ValueError:
-            logger.warning(
-                "Scheduled task %d command blocked by policy: %s", task.id, task.command
-            )
-            db.add(
-                AuditLog(
-                    user_id=task.created_by,
-                    event_type="command_blocked",
-                    command=f"[定时:{task.name}] {task.command}",
-                    device_name=",".join(d.name for d in devices),
-                    blocked=len(devices),
-                    created_at=datetime.now(timezone.utc),
-                )
-            )
-            db.commit()
-            return
-
-        from app.routers.scripts import (
-            ScriptExecuteRequest,
-            _run_on_device,
-        )
-
-        body = ScriptExecuteRequest(
-            device_ids=task.device_ids,
-            command=task.command,
-            timeout=task.timeout,
-            credential_id=task.credential_id,
-        )
-
-        results = []
-        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_SSH) as pool:
-            futures = {
-                pool.submit(_run_on_device, d, task.command, task.timeout, body): d.id
-                for d in devices
-            }
-            for future in as_completed(futures):
-                results.append(future.result())
-
-        results.sort(key=lambda r: r.device_id)
-        succeeded = sum(1 for r in results if r.success)
-
-        # Resolve creator username
-        creator_name = None
-        if task.created_by:
-            from app.models.user import User
-
-            user = db.query(User).filter(User.id == task.created_by).first()
-            if user:
-                creator_name = user.username
-
-        # Audit log
-        log = AuditLog(
-            user_id=task.created_by,
-            username=creator_name,
-            event_type="script_executed",
-            command=f"[定时:{task.name}] {task.command}",
-            device_name=",".join(d.name for d in devices),
-            device_ip=",".join(d.ip_address or "" for d in devices),
-            blocked=len(results) - succeeded,
-            created_at=utcnow(),
-        )
-        db.add(log)
-        db.commit()
-        db.refresh(log)
-        sid = f"sched_{task.id}_{log.id}"
-        log.session_id = sid
-        db.commit()
-
-        detail = AuditLog(
-            session_id=sid,
-            user_id=task.created_by,
-            username=creator_name,
-            event_type="script_result",
-            command=json.dumps(
-                [
-                    {
-                        "device_name": r.device_name,
-                        "ip": r.ip_address,
-                        "success": r.success,
-                        "exit_code": r.exit_code,
-                        "stdout": (r.stdout or "")[:2000],
-                        "stderr": (r.stderr or "")[:500],
-                        "error": (r.error or "")[:500],
-                    }
-                    for r in results
-                ],
-                ensure_ascii=False,
-            ),
-            device_name=",".join(d.name for d in devices),
-            blocked=succeeded,
-            created_at=datetime.now(timezone.utc),
-        )
-        db.add(detail)
-        db.commit()
-
-        logger.info(
-            "Scheduled task %d executed: %d/%d succeeded",
-            task.id,
-            succeeded,
-            len(results),
-        )
-    except Exception:
-        logger.exception("Error executing scheduled task %d", task.id)
-    finally:
-        db.close()
 
 
 async def run_scheduler_loop():
-    """Main scheduler loop — checks for due tasks every 30 seconds."""
-    logger.info("Scheduled task scheduler started (interval=%ds)", SCHEDULER_INTERVAL)
+    """Main scheduler loop — checks for due schedules every 30 seconds."""
+    logger.info("Automation scheduler started (interval=%ds)", SCHEDULER_INTERVAL)
     loop = asyncio.get_running_loop()
 
     while True:
         try:
-            await _check_and_run_due_tasks(loop)
+            await _check_and_run_due_automation_schedules(loop)
         except Exception:
             logger.exception("Scheduler check cycle failed")
 
         await asyncio.sleep(SCHEDULER_INTERVAL)
 
 
-async def _check_and_run_due_tasks(loop):
+async def _check_and_run_due_automation_schedules(loop):
+    """Create unified jobs for due automation schedules.
+
+    目标支持设备(正 id)与 PVE 虚拟机(合成负数 target_id)混合:授权按类型
+    分流(设备→device ACL;虚机→pve 权限+vmid ACL,power 任务要求 manage),
+    与 routers/automation.create_schedule 同口径;到期时把负数 id 解回
+    (connection_id, vmid) 拼进 create_job_record 的 pve_targets。
+    授权失效/虚机平台删除时停用计划并留日志,行为与设备目标失权时一致。
+    paused(用户暂停)不进到期扫描,恢复后按既有周期继续。
+    """
+    from app.models.pve_connection import PveConnection
+    from app.models.pve_guest_binding import PveGuestBinding
+    from app.services.containers_collector import decode_pve_target_id
+    from app.services.permissions import user_can_access_pve, user_can_access_pve_vmid
+
     db = SessionLocal()
     try:
-        now = utcnow()
-        due_tasks = (
-            db.query(ScheduledTask)
+        now = datetime.now(timezone.utc)
+        schedules = (
+            db.query(AutomationSchedule)
             .filter(
-                ScheduledTask.status.in_(["pending", "active"]),
-                ScheduledTask.next_run_at != None,  # noqa: E711
-                ScheduledTask.next_run_at <= now,
+                AutomationSchedule.status == "active",
+                AutomationSchedule.next_run_at != None,  # noqa: E711
+                AutomationSchedule.next_run_at <= now,
             )
             .all()
         )
-
-        for task in due_tasks:
-            logger.info("Executing scheduled task %d: %s", task.id, task.name)
-
-            task.last_run_at = now
-            if task.schedule_type == "once":
-                task.status = "completed"
-                task.next_run_at = None
+        for schedule in schedules:
+            owner = db.query(User).filter(User.id == schedule.created_by).first()
+            permission = {
+                "agent": "device:remote",
+                "inspection": "automation:manage",
+                "script": "automation:manage",
+                "power": "automation:manage",
+            }.get(schedule.job_type)
+            authorized = bool(
+                owner
+                and owner.is_active
+                and permission
+                and user_has_permission(owner, permission, db)
+            )
+            device_ids: list[int] = []
+            pve_targets: list[dict] = []
+            if authorized:
+                for tid in schedule.target_ids or []:
+                    decoded = decode_pve_target_id(tid)
+                    if decoded:
+                        connection_id, vmid = decoded
+                        conn = (
+                            db.query(PveConnection)
+                            .filter(
+                                PveConnection.id == connection_id,
+                                PveConnection.enabled == 1,
+                            )
+                            .first()
+                        )
+                        binding = (
+                            db.query(PveGuestBinding)
+                            .filter_by(
+                                connection_id=connection_id, vmid=vmid, enabled=1
+                            )
+                            .first()
+                        )
+                        if not user_can_access_pve(
+                            owner, db, manage=schedule.job_type == "power"
+                        ) or not user_can_access_pve_vmid(
+                            owner, db, connection_id, vmid
+                        ):
+                            authorized = False
+                            break
+                        if conn is None:
+                            authorized = False
+                            break
+                        pve_targets.append(
+                            {
+                                "connection_id": connection_id,
+                                "vmid": vmid,
+                                "guest_type": (
+                                    binding.guest_type if binding else "qemu"
+                                ),
+                                "name": f"[{conn.name}] {(binding and binding.ip_address) or f'VM {vmid}'}",
+                            }
+                        )
+                    elif tid > 0:
+                        if not user_can_access_device(owner, tid, db):
+                            authorized = False
+                            break
+                        device_ids.append(tid)
+            if not authorized:
+                schedule.status = "disabled"
+                schedule.next_run_at = None
+                db.commit()
+                logger.warning(
+                    "Automation schedule %d disabled after permission check",
+                    schedule.id,
+                )
+                continue
+            job = create_job_record(
+                db,
+                name=schedule.name,
+                job_type=schedule.job_type,
+                device_ids=device_ids,
+                pve_targets=pve_targets,
+                config=dict(schedule.config_json or {}),
+                user_id=schedule.created_by,
+                user_name=schedule.created_by_name,
+                trigger_type="scheduled",
+            )
+            schedule.last_run_at = now
+            if schedule.schedule_type == "once":
+                schedule.status = "completed"
+                schedule.next_run_at = None
             else:
                 try:
-                    task.next_run_at = next_cron_time(task.cron_expression, now)
+                    schedule.next_run_at = next_cron_time(schedule.cron_expression, now)
                 except ValueError:
-                    logger.error(
-                        "Invalid cron for task %d: %s", task.id, task.cron_expression
-                    )
-                    task.status = "disabled"
-                    task.next_run_at = None
+                    schedule.status = "disabled"
+                    schedule.next_run_at = None
             db.commit()
-
-            await loop.run_in_executor(None, _execute_task, task)
+            start_automation_job(job.id)
     except Exception:
-        logger.exception("Error in scheduler check cycle")
+        logger.exception("Error executing unified automation schedules")
     finally:
         db.close()

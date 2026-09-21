@@ -4,24 +4,31 @@ WebSocket terminal router.
 Provides a single endpoint  ``/ws/terminal/{device_id}``  that brokers an
 interactive SSH or RDP session between the browser and the target device.
 
-Authentication is performed by extracting a JWT *token* from the query string.
-Credentials can be supplied directly via *username*/*password* or by referencing
-a stored *credential_id*.
+Authentication and resolved credentials are carried in a short-lived,
+single-use ticket issued by ``POST /api/terminal/ticket``.  The WebSocket URL
+therefore never contains a JWT, username, or password.
 """
 
 import asyncio
 import json
 import logging
+import os
 import uuid
 
-import jwt
-from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from app.config import GUACD_HOST, GUACD_PORT, JWT_ALGORITHM, JWT_SECRET
+from app.config import GUACD_HOST, GUACD_PORT, GUACD_USE_RELAY
 from app.database import SessionLocal, get_db
-from app.models.credential import Credential
 from app.models.device import Device
 from app.models.user import User
 from app.services import token_blacklist
@@ -36,45 +43,41 @@ from app.services.guacamole import (
 from app.services.permissions import (
     require_permission,
     user_can_access_device,
+    user_can_use_credential,
     user_has_permission,
 )
-from app.services.recorder import SessionRecorder
-from app.services.settings import is_audit_enabled, is_recording_enabled
-from app.services.storage import upload_rdp_recording
 from app.services.terminal import create_ssh_connection
-from app.services.ws_ticket import consume_ticket, issue_ticket
+from app.services.ws_ticket import (
+    consume_credential,
+    consume_ticket,
+    issue_credential,
+    issue_ticket,
+    peek_ticket,
+)
+from app.validators import validate_container_name
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["terminal"])
 
 
-def _ws_access_payload(websocket: WebSocket) -> dict | None:
-    """Decode the httpOnly access cookie on a same-origin WebSocket.
-
-    Validates signature, expiry, and token type. Returns the payload (caller
-    still checks the blacklist + permissions) or None.
-    """
-    token = websocket.cookies.get("dcn_access")
-    if not token:
-        return None
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except Exception:
-        return None
-    if payload.get("type") != "access":
-        return None
-    return payload
-
-
 class TerminalTicketRequest(BaseModel):
-    device_id: int
-    conn_type: str = "ssh"
+    device_id: int = Field(ge=1)
+    conn_type: str = Field(default="ssh", min_length=1, max_length=8)
     credential_id: int | None = None
-    username: str | None = None
-    password: str | None = None
-    width: int = 1024
-    height: int = 768
+    username: str | None = Field(default=None, max_length=255)
+    password: str | None = Field(default=None, max_length=4096)
+    ssh_key: str | None = Field(default=None, max_length=16384)
+    width: int = Field(default=1024, ge=320, le=7680)
+    height: int = Field(default=768, ge=240, le=4320)
+    container: str | None = None  # 非空时进入该容器的交互式 shell(docker exec)
+
+    @field_validator("conn_type")
+    @classmethod
+    def _validate_conn_type(cls, value):
+        if value not in {"ssh", "rdp"}:
+            raise ValueError("conn_type 必须是 ssh 或 rdp")
+        return value
 
 
 def _access_jti(request: Request) -> str:
@@ -105,7 +108,6 @@ def create_terminal_ticket(
     contains the JWT, username, or password. The WS consumes the ticket within
     a short TTL.
     """
-    from fastapi import HTTPException
 
     device = db.query(Device).filter(Device.id == body.device_id).first()
     if device is None:
@@ -113,22 +115,51 @@ def create_terminal_ticket(
     if not user_can_access_device(current_user, body.device_id, db):
         raise HTTPException(status_code=403, detail="无权访问该设备")
 
+    # 平台约定 Windows 设备不装 SSH——远程操作用 RDP(WinRM 无交互式 shell)
+    if body.conn_type == "ssh" and device.is_windows:
+        raise HTTPException(
+            status_code=400, detail="Windows 设备不支持 SSH 终端，请使用 RDP 连接"
+        )
+
+    # 容器终端仅支持 SSH(Linux 容器);校验容器名防注入
+    container: str | None = None
+    if body.container:
+        if body.conn_type != "ssh":
+            raise HTTPException(status_code=400, detail="容器终端仅支持 SSH 连接")
+        try:
+            container = validate_container_name(body.container)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not user_can_use_credential(current_user, device, body.credential_id, db):
+        raise HTTPException(status_code=403, detail="该凭据未绑定到目标设备")
     username, password = _resolve_credentials(
-        body.credential_id, body.username or "", body.password or ""
+        device, body.username or "", body.password, db
+    )
+    private_key = body.ssh_key or (
+        decrypt(device.remote_ssh_key_enc) if device.remote_ssh_key_enc else ""
     )
     if body.conn_type == "ssh" and not username:
         username = "root"
 
+    credential_ref = issue_credential(
+        {
+            "username": username,
+            "password": password,
+            "private_key": private_key,
+        }
+    )
     payload = {
         "user_id": current_user.id,
         "system_username": current_user.username,
         "device_id": body.device_id,
         "conn_type": body.conn_type,
-        "cred_username": username,
-        "cred_password": password,
+        "credential_ref": credential_ref,
         "width": body.width,
         "height": body.height,
+        "container": container,
         "access_jti": _access_jti(request),
+        "session_version": int(getattr(current_user, "session_version", 0)),
     }
     return {"ticket": issue_ticket(payload)}
 
@@ -143,29 +174,149 @@ def _get_device(device_id: int) -> Device | None:
 
 
 def _resolve_credentials(
-    credential_id: int | None,
+    device: Device,
     username: str,
-    password: str,
+    password: str | None,
+    db: Session | None = None,
 ) -> tuple[str, str]:
-    """Resolve credentials: use stored credential if credential_id is given, else use direct params."""
-    if not credential_id:
-        return username, password
-
-    db: Session = SessionLocal()
-    try:
-        cred = db.query(Credential).filter(Credential.id == credential_id).first()
-        if not cred:
-            return username, password
-        resolved_user = cred.username or username
-        resolved_pass = decrypt(cred.password_enc) if cred.password_enc else password
-        return resolved_user, resolved_pass
-    finally:
-        db.close()
+    """Resolve direct credentials, falling back to the device-owned secret."""
+    # An empty string is how the terminal UI represents "use the saved
+    # device credential". Treat it like an omitted password; otherwise the
+    # empty value would override the encrypted device password and force a
+    # second prompt on every connection.
+    resolved_password = (
+        password
+        if password
+        else (decrypt(device.remote_password_enc) if device.remote_password_enc else "")
+    )
+    return username or device.remote_username or "", resolved_password
 
 
 # ------------------------------------------------------------------
 # RDP handler via Guacamole
 # ------------------------------------------------------------------
+
+
+# Root of the per-session GuacamoleFS virtual drives (inside the guacd volume).
+# The backend can only clean these up directly when it shares the mount (prod);
+# on a dev host this rmtree is a harmless no-op unless overridden to a bind mount.
+GUACD_DRIVE_ROOT = os.environ.get("GUACD_DRIVE_ROOT", "/var/guacd/drives")
+
+
+def _cleanup_drive_dir(session_id: str) -> None:
+    """Best-effort removal of a session's GuacamoleFS drive directory."""
+    safe = "".join(c for c in session_id if c.isalnum() or c in "-_")
+    if not safe:
+        return
+    path = os.path.join(GUACD_DRIVE_ROOT, safe)
+    try:
+        import shutil
+
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        logger.debug("Drive dir cleanup skipped for %s", safe, exc_info=True)
+
+
+def _sanitize_rdp_instructions(
+    instructions: list[tuple[str, list[str]]],
+    width: int,
+    height: int,
+    *,
+    drop_server_mouse: bool = False,
+) -> tuple[list[bytes], int, int, int]:
+    """Sanitize a Guacamole instruction batch.
+
+    ``mouse`` is a server-to-client cursor-position update. It is deliberately
+    omitted in that direction: browsers already have the authoritative local
+    pointer position, and applying delayed RDP pointer updates to a software
+    cursor causes visible jumps/wraparound at the display edges. Client-origin
+    mouse input is still forwarded and clamped normally.
+    """
+    current_width = max(1, int(width))
+    current_height = max(1, int(height))
+    clamped = 0
+    rebuilt: list[bytes] = []
+
+    def clamp_edge(value: int, limit: int) -> int:
+        # Avoid exact framebuffer edges, which can be interpreted as wrap
+        # points by some FreeRDP/RDP pointer paths.
+        inset = 2 if limit > 5 else 0
+        minimum = inset
+        maximum = max(minimum, limit - 1 - inset)
+        return max(minimum, min(maximum, value))
+
+    for opcode, args in instructions:
+        safe_args = list(args)
+        if opcode == "size" and len(safe_args) >= 2:
+            try:
+                next_width = int(safe_args[0])
+                next_height = int(safe_args[1])
+                if next_width > 0 and next_height > 0:
+                    current_width = next_width
+                    current_height = next_height
+            except (TypeError, ValueError):
+                pass
+        elif opcode == "mouse" and len(safe_args) >= 2:
+            if drop_server_mouse:
+                continue
+            try:
+                x = int(float(safe_args[0]))
+                y = int(float(safe_args[1]))
+                safe_x = clamp_edge(x, current_width)
+                safe_y = clamp_edge(y, current_height)
+                if safe_x != x or safe_y != y:
+                    clamped += 1
+                safe_args[0] = str(safe_x)
+                safe_args[1] = str(safe_y)
+            except (TypeError, ValueError):
+                pass
+        rebuilt.append(_build_instruction(opcode, *safe_args))
+
+    return rebuilt, current_width, current_height, clamped
+
+
+# 浏览器 → guacd 方向只有 mouse 需要钳位、size 需要更新当前分辨率，其余指令
+# (blob/ack/key/end/sync…) 原样透传即可。Guacamole 指令形如
+# ``<len>.<opcode>,<len>.<arg>...;``，参数是数字或 base64，字符集里没有 '.' 和
+# ','，因此按精确字面量嗅探 opcode 不会误判。
+_MOUSE_OPCODE = b"5.mouse,"
+_SIZE_OPCODE = b"4.size,"
+
+
+def _needs_rdp_rewrite(raw: bytes) -> bool:
+    """该上行报文是否需要解析改写；绝大多数 blob 流量在此直接短路。
+
+    上传大文件时每条 6KB 的 blob 都要经过这里，曾经对同一条指令做三次完整
+    解析（鼠标计数一次、钳位一次、日志一次）并重新编码，全部发生在事件循环
+    上。改成先嗅探 opcode，只在真的有 mouse/size 时才解析。
+    """
+    return _MOUSE_OPCODE in raw or _SIZE_OPCODE in raw
+
+
+def _first_mouse_coords(raw: bytes) -> tuple[str, str]:
+    """取出报文里第一条 mouse 指令的坐标，仅用于日志。"""
+    parsed, _tail = _parse_instruction(raw)
+    if parsed and parsed[0] == "mouse" and len(parsed[1]) >= 2:
+        return parsed[1][0], parsed[1][1]
+    return "?", "?"
+
+
+def _sanitize_rdp_input(
+    raw: bytes, width: int, height: int
+) -> tuple[bytes, int, int, int]:
+    """Clamp browser-originated mouse coordinates before forwarding to guacd."""
+    remaining = raw
+    instructions: list[tuple[str, list[str]]] = []
+    while remaining:
+        parsed, tail = _parse_instruction(remaining)
+        if parsed is None or len(tail) >= len(remaining):
+            return raw, width, height, 0
+        instructions.append(parsed)
+        remaining = tail
+    rebuilt, current_width, current_height, clamped = _sanitize_rdp_instructions(
+        instructions, width, height
+    )
+    return b"".join(rebuilt), current_width, current_height, clamped
 
 
 async def _handle_rdp(
@@ -178,20 +329,24 @@ async def _handle_rdp(
     width: int = 1024,
     height: int = 768,
     session_id: str | None = None,
+    target_host: str | None = None,
+    target_port: int | None = None,
+    target_name: str | None = None,
+    enable_drive: bool = True,
 ) -> None:
     """Bridge a WebSocket connection to guacd for RDP."""
 
     logger.info("RDP: requested resolution %dx%d", width, height)
 
-    device = _get_device(device_id)
-    if device is None:
+    device = _get_device(device_id) if device_id else None
+    if device is None and not target_host:
         await websocket.send_json(
             {"type": "error", "data": f"Device {device_id} not found"}
         )
         await websocket.close(code=4004)
         return
 
-    if not device.ip_address:
+    if not (target_host or (device and device.ip_address)):
         await websocket.send_json(
             {
                 "type": "error",
@@ -201,80 +356,50 @@ async def _handle_rdp(
         await websocket.close(code=4000)
         return
 
-    rdp_port = device.rdp_port or 3389
+    target_host = target_host or device.ip_address
+    rdp_port = target_port or (device.rdp_port if device else 3389) or 3389
     logger.info(
         "RDP: device=%s ip=%s port=%d user=%s",
-        device.name,
-        device.ip_address,
+        target_name or (device.name if device else "PVE guest"),
+        target_host,
         rdp_port,
         username,
     )
 
-    # --- RDP Recording setup ---
-    _rec_db = SessionLocal()
-    try:
-        recording_active = is_recording_enabled(_rec_db) and is_audit_enabled(_rec_db)
-    except Exception:
-        recording_active = False
-    finally:
-        _rec_db.close()
     rdp_session_id = session_id or str(uuid.uuid4())
-    rdp_start_time = None
-    rdp_events: list[str] = []
-    rdp_db_recording_id: int | None = None
-
-    if recording_active:
-        rdp_start_time = asyncio.get_running_loop().time()
-        from datetime import datetime
-        from datetime import timezone as tz
-
-        from app.models.session_recording import SessionRecording as SR
-
-        db = SessionLocal()
-        try:
-            rec = SR(
-                session_id=rdp_session_id,
-                device_id=device.id,
-                user_id=user_id,
-                device_name=device.name,
-                device_ip=device.ip_address or "",
-                username=username,
-                conn_type="rdp",
-            )
-            db.add(rec)
-            db.commit()
-            db.refresh(rec)
-            rdp_db_recording_id = rec.id
-        except Exception:
-            logger.exception("Failed to create RDP recording record")
-            recording_active = False
-        finally:
-            db.close()
 
     session = GuacamoleSession(host=GUACD_HOST, port=GUACD_PORT)
 
     # Start TCP relay so guacd (Docker) can reach the RDP target through the host
     relay_server: asyncio.AbstractServer | None = None
-    relay_hostname = device.ip_address
+    relay_hostname = target_host
     relay_port = rdp_port
-    try:
-        relay_server, local_relay_port = await start_rdp_relay(
-            device.ip_address, rdp_port
-        )
-        import platform
+    if GUACD_USE_RELAY:
+        try:
+            relay_server, local_relay_port = await start_rdp_relay(
+                target_host, rdp_port
+            )
+            import platform
 
-        if GUACD_HOST in ("localhost", "127.0.0.1") and platform.system() != "Linux":
-            relay_hostname = "host.docker.internal"
-        relay_port = local_relay_port
+            if (
+                GUACD_HOST in ("localhost", "127.0.0.1")
+                and platform.system() != "Linux"
+            ):
+                relay_hostname = "host.docker.internal"
+            relay_port = local_relay_port
+            logger.info(
+                "RDP relay started: guacd -> %s:%d -> %s:%d",
+                relay_hostname,
+                relay_port,
+                target_host,
+                rdp_port,
+            )
+        except Exception as exc:
+            logger.warning("RDP relay failed to start, connecting directly: %s", exc)
+    else:
         logger.info(
-            "RDP relay started: guacd -> %s:%d -> %s:%d",
-            relay_hostname,
-            relay_port,
-            device.ip_address,
-            rdp_port,
+            "RDP relay disabled; using direct guacd -> %s:%d", target_host, rdp_port
         )
-    except Exception as exc:
-        logger.warning("RDP relay failed to start, connecting directly: %s", exc)
 
     try:
         logger.info("RDP: connecting to guacd at %s:%d ...", GUACD_HOST, GUACD_PORT)
@@ -287,57 +412,65 @@ async def _handle_rdp(
             password=password,
             width=width,
             height=height,
+            session_id=rdp_session_id,
+            enable_drive=enable_drive,
         )
         logger.info("RDP: handshake complete, starting bridge loops")
+        rdp_dimensions = {"width": max(1, int(width)), "height": max(1, int(height))}
 
         async def read_from_guacd():
             """Forward Guacamole instructions from guacd to WebSocket."""
-            nonlocal recording_active
             count = 0
+            suppressed_mouse_count = 0
             try:
                 while session.is_connected:
-                    opcode, args = await session.read_instruction()
-                    data = _build_instruction(opcode, *args)
-                    await websocket.send_text(data.decode("utf-8"))
-                    count += 1
-
-                    # Record output instruction
-                    if (
-                        recording_active
-                        and rdp_start_time is not None
-                        and opcode != "nop"
-                    ):
-                        elapsed_ms = int(
-                            (asyncio.get_running_loop().time() - rdp_start_time) * 1000
+                    batch, raw_batch = await session.read_instruction_batch_raw()
+                    # Downstream file traffic is dominated by blob/ack instructions.
+                    # Only mouse/size require filtering or clamping; everything else
+                    # can be forwarded byte-for-byte without parse/rebuild overhead.
+                    if not _needs_rdp_rewrite(raw_batch):
+                        payload = raw_batch
+                        next_width = rdp_dimensions["width"]
+                        next_height = rdp_dimensions["height"]
+                        clamped = 0
+                    else:
+                        safe_batch, next_width, next_height, clamped = (
+                            _sanitize_rdp_instructions(
+                                batch,
+                                rdp_dimensions["width"],
+                                rdp_dimensions["height"],
+                                drop_server_mouse=True,
+                            )
                         )
-                        raw_text = data.decode("utf-8").replace("\n", "")
-                        rdp_events.append(f"{elapsed_ms}|{raw_text}")
-
-                    if opcode in (
-                        "size",
-                        "img",
-                        "sync",
-                        "png",
-                        "jpeg",
-                        "end",
-                        "error",
-                        "disconnect",
-                    ):
-                        arg_summary = []
-                        for a in args[:6]:
-                            arg_summary.append(a[:50] if len(a) > 50 else a)
+                        payload = b"".join(safe_batch)
+                    rdp_dimensions["width"] = next_width
+                    rdp_dimensions["height"] = next_height
+                    suppressed_mouse_count += sum(
+                        1 for opcode, _ in batch if opcode == "mouse"
+                    )
+                    if suppressed_mouse_count and suppressed_mouse_count <= 5:
                         logger.info(
-                            "RDP -> browser: #%d opcode=%s args=%s",
-                            count,
-                            opcode,
-                            arg_summary,
+                            "RDP server cursor-position updates suppressed; "
+                            "browser native cursor is authoritative"
                         )
-                    elif count <= 20 or count % 200 == 0:
-                        logger.info(
-                            "RDP -> browser: #%d opcode=%s args_count=%d",
+                    if clamped:
+                        logger.warning(
+                            "Clamped %d out-of-range RDP server mouse instruction(s) to %dx%d",
+                            clamped,
+                            next_width,
+                            next_height,
+                        )
+                    # guacamole-common-js accepts multiple complete protocol
+                    # instructions in one WebSocket message. This dramatically
+                    # reduces per-frame overhead during screen updates.
+                    if payload:
+                        await websocket.send_text(payload.decode("utf-8"))
+                    count += len(batch)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "RDP -> browser: %d instructions (total=%d)",
+                            len(batch),
                             count,
-                            opcode,
-                            len(args),
                         )
             except (ConnectionError, Exception) as e:
                 logger.info("guacd read loop ended after %d instructions: %s", count, e)
@@ -345,23 +478,54 @@ async def _handle_rdp(
         async def write_to_guacd():
             """Forward raw Guacamole instructions from WebSocket to guacd."""
             count = 0
+            mouse_count = 0
             try:
                 while session.is_connected:
                     raw = await websocket.receive_text()
                     if not raw:
                         break
-                    try:
-                        parsed, _ = _parse_instruction(raw.encode("utf-8"))
-                        if parsed:
-                            op = parsed[0]
-                            count += 1
-                            if count <= 10 or count % 100 == 0:
-                                logger.info(
-                                    "browser -> RDP: opcode=%s (total=%d)", op, count
-                                )
-                    except Exception:
-                        pass
-                    await session.write_raw(raw.encode("utf-8"))
+                    raw_bytes = raw.encode("utf-8")
+                    count += 1
+                    if not _needs_rdp_rewrite(raw_bytes):
+                        # 热路径（上传时的 blob 洪峰）：不解析、不重编码，直接转发。
+                        await session.write_raw(raw_bytes)
+                        continue
+
+                    safe_raw, current_width, current_height, clamped = (
+                        _sanitize_rdp_input(
+                            raw_bytes,
+                            rdp_dimensions["width"],
+                            rdp_dimensions["height"],
+                        )
+                    )
+                    rdp_dimensions["width"] = current_width
+                    rdp_dimensions["height"] = current_height
+
+                    mice = raw_bytes.count(_MOUSE_OPCODE)
+                    if mice:
+                        mouse_count += mice
+                        if mouse_count <= 5 or mouse_count % 100 == 0:
+                            # 只在真正要打日志时才解析坐标，避免每条鼠标指令都
+                            # 多付一次完整解析。
+                            coords = _first_mouse_coords(safe_raw)
+                            logger.warning(
+                                "RDP browser mouse #%d: x=%s y=%s size=%dx%d",
+                                mouse_count,
+                                coords[0],
+                                coords[1],
+                                current_width,
+                                current_height,
+                            )
+                    if clamped:
+                        logger.warning(
+                            "Clamped %d out-of-range RDP mouse instruction(s) to %dx%d",
+                            clamped,
+                            current_width,
+                            current_height,
+                        )
+                    if count <= 10 or count % 100 == 0:
+                        logger.info("browser -> RDP: %d instruction(s)", count)
+                    await session.write_raw(safe_raw)
             except (WebSocketDisconnect, Exception) as e:
                 logger.info(
                     "WebSocket write loop ended after %d instructions: %s", count, e
@@ -408,291 +572,17 @@ async def _handle_rdp(
         except Exception:
             pass
     finally:
-        # --- Finalize RDP recording ---
-        if recording_active and rdp_db_recording_id and rdp_events:
-            try:
-                from datetime import datetime
-                from datetime import timezone as tz
-
-                header = json.dumps(
-                    {
-                        "v": 1,
-                        "type": "rdp",
-                        "width": width,
-                        "height": height,
-                        "ts": int(asyncio.get_running_loop().time()),
-                    }
-                )
-                lines = [header] + rdp_events
-                file_data = "\n".join(lines).encode("utf-8")
-                duration = rdp_events[-1].split("|")[0] if rdp_events else "0"
-                duration_sec = int(duration) // 1000
-
-                file_path = upload_rdp_recording(rdp_session_id, file_data)
-
-                db = SessionLocal()
-                try:
-                    from app.models.session_recording import SessionRecording as SR
-
-                    rec = db.query(SR).filter(SR.id == rdp_db_recording_id).first()
-                    if rec:
-                        rec.file_path = file_path
-                        rec.file_size = len(file_data)
-                        rec.ended_at = datetime.now(tz.utc)
-                        rec.duration_seconds = duration_sec
-                        db.commit()
-                finally:
-                    db.close()
-                logger.info(
-                    "RDP recording saved: %d events, %d bytes, %ds",
-                    len(rdp_events),
-                    len(file_data),
-                    duration_sec,
-                )
-            except Exception:
-                logger.exception("Failed to save RDP recording")
-
         await session.close()
         if relay_server:
             relay_server.close()
             await relay_server.wait_closed()
             logger.info("RDP relay stopped")
+        # Remove this session's GuacamoleFS drive dir (best-effort; see helper).
+        _cleanup_drive_dir(rdp_session_id)
         try:
             await websocket.close()
         except Exception:
             pass
-
-
-# ------------------------------------------------------------------
-# RDP Recording Replay
-# ------------------------------------------------------------------
-
-
-@router.websocket("/ws/rdp-recording/{recording_id}")
-async def rdp_recording_replay_ws(
-    websocket: WebSocket,
-    recording_id: int,
-):
-    """Replay an RDP session recording by streaming Guacamole instructions.
-
-    Authenticated via the httpOnly access cookie (same-origin); requires
-    ``audit:manage`` so only auditors/admins can replay sessions.
-    """
-    payload = _ws_access_payload(websocket)
-    if payload is None:
-        await websocket.close(code=4001)
-        return
-
-    from app.services.storage import download_rdp_recording
-
-    db = SessionLocal()
-    try:
-        from app.models.session_recording import SessionRecording
-
-        jti = payload.get("jti", "")
-        if jti and token_blacklist.is_blacklisted(jti, db):
-            await websocket.close(code=4001)
-            return
-        try:
-            user_id = int(payload.get("sub", 0))
-        except (TypeError, ValueError):
-            await websocket.close(code=4001)
-            return
-        user = db.query(User).filter(User.id == user_id).first()
-        if (
-            user is None
-            or not user.is_active
-            or not user_has_permission(user, "audit:manage", db)
-        ):
-            await websocket.close(code=4003)
-            return
-
-        rec = (
-            db.query(SessionRecording)
-            .filter(SessionRecording.id == recording_id)
-            .first()
-        )
-        if not rec or rec.conn_type != "rdp":
-            await websocket.close(code=4004)
-            return
-        session_id = rec.session_id
-    finally:
-        db.close()
-
-    data = download_rdp_recording(session_id)
-    if not data:
-        await websocket.close(code=4004)
-        return
-
-    lines = data.decode("utf-8").split("\n")
-    if len(lines) < 2:
-        await websocket.close(code=4004)
-        return
-
-    header = json.loads(lines[0])
-    width = header.get("width", 1024)
-    height = header.get("height", 768)
-
-    events: list[tuple[int, str]] = []
-    for line in lines[1:]:
-        if not line.strip():
-            continue
-        parts = line.split("|", 1)
-        if len(parts) == 2:
-            events.append((int(parts[0]), parts[1]))
-
-    if not events:
-        await websocket.close(code=4004)
-        return
-
-    total_duration_ms = events[-1][0]
-
-    await websocket.accept(subprotocol="guacamole")
-
-    # Send initial handshake response to initialize the Guacamole client
-    from app.services.guacamole import _build_instruction
-
-    ready = _build_instruction(
-        "ready", "VERSION_1_5_0", f"Recording-{recording_id}", str(width), str(height)
-    )
-    await websocket.send_text(ready.decode("utf-8"))
-    # Send initial size for the default layer (0)
-    size_instr = _build_instruction("size", "0", str(width), str(height))
-    await websocket.send_text(size_instr.decode("utf-8"))
-    # Flush the initial size so the display canvas is created at the right dimensions.
-    # Without sync, all queued drawing operations stay pending forever.
-    initial_sync = _build_instruction("sync", "0")
-    await websocket.send_text(initial_sync.decode("utf-8"))
-
-    # Playback state — wait for client 'play' command
-    playing = False
-    speed = 1.0
-    current_idx = 0
-    start_wall = 0.0
-    start_offset_ms = 0
-
-    async def send_instructions():
-        nonlocal current_idx, start_wall, start_offset_ms, playing, speed
-        try:
-            while True:
-                if not playing:
-                    await asyncio.sleep(0.05)
-                    continue
-
-                if current_idx >= len(events):
-                    playing = False
-                    await asyncio.sleep(0.05)
-                    continue
-
-                elapsed_ms = (
-                    asyncio.get_running_loop().time() - start_wall
-                ) * 1000 * speed + start_offset_ms
-
-                # Batch instructions that are due into a single WebSocket message
-                batch: list[str] = []
-                while (
-                    current_idx < len(events) and events[current_idx][0] <= elapsed_ms
-                ):
-                    batch.append(events[current_idx][1])
-                    current_idx += 1
-
-                if batch:
-                    await websocket.send_text("".join(batch))
-                    # Inject sync to flush the Guacamole client display.
-                    # Old recordings may lack sync instructions; new recordings
-                    # include them, but an extra sync is harmless.
-                    sync_instr = _build_instruction("sync", str(int(elapsed_ms)))
-                    await websocket.send_text(sync_instr.decode("utf-8"))
-
-                if current_idx >= len(events):
-                    playing = False
-                    continue
-
-                next_ms = events[current_idx][0]
-                wait = (next_ms - elapsed_ms) / speed / 1000
-                await asyncio.sleep(max(0.005, min(wait, 0.1)))
-
-        except Exception:
-            pass
-
-    async def recv_commands():
-        nonlocal playing, speed, current_idx, start_wall, start_offset_ms
-        try:
-            while True:
-                raw = await websocket.receive_text()
-                try:
-                    msg = json.loads(raw)
-                except Exception:
-                    continue
-
-                if msg.get("action") == "pause":
-                    start_offset_ms = (
-                        start_offset_ms
-                        + (asyncio.get_running_loop().time() - start_wall)
-                        * 1000
-                        * speed
-                    )
-                    playing = False
-                elif msg.get("action") == "play":
-                    start_wall = asyncio.get_running_loop().time()
-                    playing = True
-                elif msg.get("action") == "seek":
-                    target_ms = int(msg.get("time", 0))
-                    current_idx = 0
-                    for i, (ts, _) in enumerate(events):
-                        if ts >= target_ms:
-                            current_idx = i
-                            break
-                    else:
-                        current_idx = len(events)
-                    start_offset_ms = target_ms
-                    start_wall = asyncio.get_running_loop().time()
-                    # Send all instructions up to seek point
-                    for i in range(current_idx):
-                        await websocket.send_text(events[i][1])
-                    # Flush display after seek
-                    seek_sync = _build_instruction("sync", str(target_ms))
-                    await websocket.send_text(seek_sync.decode("utf-8"))
-                elif msg.get("action") == "speed":
-                    start_offset_ms = (
-                        start_offset_ms
-                        + (asyncio.get_running_loop().time() - start_wall)
-                        * 1000
-                        * speed
-                    )
-                    start_wall = asyncio.get_running_loop().time()
-                    speed = float(msg.get("value", 1))
-                elif msg.get("action") == "info":
-                    await websocket.send_text(
-                        json.dumps(
-                            {
-                                "action": "info",
-                                "duration": total_duration_ms,
-                                "width": width,
-                                "height": height,
-                            }
-                        )
-                    )
-        except Exception:
-            pass
-
-    send_task = asyncio.create_task(send_instructions())
-    recv_task = asyncio.create_task(recv_commands())
-
-    done, pending = await asyncio.wait(
-        [send_task, recv_task], return_when=asyncio.FIRST_COMPLETED
-    )
-    for t in pending:
-        t.cancel()
-        try:
-            await t
-        except asyncio.CancelledError:
-            pass
-
-    try:
-        await websocket.close()
-    except Exception:
-        pass
 
 
 # ------------------------------------------------------------------
@@ -712,15 +602,18 @@ async def terminal_ws(
 
     Query parameters
     ----------------
-    token         : JWT access token (required)
-    conn_type     : ``ssh`` or ``rdp``
-    width/height  : RDP display dimensions
+    ticket        : single-use opaque terminal ticket (required)
+    session_id    : optional client-side session identifier for RDP drive cleanup
 
-    After WebSocket is accepted, the client must send a JSON message:
-    {"type": "auth", "username": "...", "password": "...", "credential_id": N}
+    Credentials and connection type are resolved from the ticket.  After the
+    WebSocket is accepted, SSH clients send only ``input``, ``paste`` and
+    ``resize`` messages; RDP clients speak the Guacamole protocol directly.
     """
-    # --- Consume the single-use terminal ticket -------------------------
-    ticket_payload = consume_ticket(ticket)
+    # --- 两阶段:先 peek(不消费)校验,全部通过后才消费票据 + 凭据 ----------
+    # 一次性票据若在握手期被网络抖动烧掉,前端重连会拿到「票据无效」,
+    # 已授权用户也得回 HTTP 重新开票。改为:peek 出 payload → 校验身份/权限
+    # → 校验通过才原子 GETDEL 消费。校验失败不消费,票据留给合法重试。
+    ticket_payload = peek_ticket(ticket)
     if not ticket_payload or ticket_payload.get("device_id") != device_id:
         await websocket.accept()
         await websocket.send_json(
@@ -730,15 +623,30 @@ async def terminal_ws(
         return
 
     conn_type = ticket_payload.get("conn_type", "ssh")
-    username = ticket_payload.get("cred_username", "")
-    password = ticket_payload.get("cred_password", "")
     width = int(ticket_payload.get("width", 1024))
     height = int(ticket_payload.get("height", 768))
     user_id_val = int(ticket_payload.get("user_id", 0))
     system_username_val = ticket_payload.get("system_username", "")
     access_jti = ticket_payload.get("access_jti", "")
-    if conn_type == "ssh" and not username:
-        username = "root"
+    session_version = int(ticket_payload.get("session_version", 0))
+
+    # 容器终端:票据里带了 container 则连接后自动 docker exec 进入
+    container_val = ticket_payload.get("container") or None
+    initial_command = None
+    if container_val and conn_type == "ssh":
+        try:
+            container_val = validate_container_name(container_val)
+            # bash 优先(历史/补全体验好);镜像里没有再退 sh/ash——`||` 链在
+            # 容器内运行时逐个探测,无需预判镜像。distroless 镜像一个都没有时,
+            # SSH shell 仍可用。
+            initial_command = (
+                f"docker exec -it {container_val} bash"
+                f" || docker exec -it {container_val} sh"
+                f" || docker exec -it {container_val} ash"
+            )
+        except ValueError:
+            container_val = None
+            initial_command = None
 
     subprotocol = "guacamole" if conn_type == "rdp" else None
 
@@ -754,6 +662,9 @@ async def terminal_ws(
             user = db.query(User).filter(User.id == user_id_val).first()
             if user is None or not user.is_active:
                 error_data = "账户已被禁用"
+            elif int(getattr(user, "session_version", 0)) != session_version:
+                error_data = "登录状态已变更，请重新发起连接"
+                error_code = 4001
             elif not user_has_permission(user, "device:remote", db):
                 error_data = "权限不足：无终端访问权限"
             elif not user_can_access_device(user, device_id, db):
@@ -772,6 +683,30 @@ async def terminal_ws(
             return
     finally:
         db.close()
+
+    # --- 校验全部通过:此时才消费一次性票据与凭据 --------------------------
+    ticket_payload = consume_ticket(ticket)
+    if not ticket_payload:
+        # 并发重连:另一连接抢先消费了同一张票 → 让本次关闭,客户端走重试。
+        await websocket.accept()
+        await websocket.send_json(
+            {"type": "error", "data": "终端票据已被使用，请重新发起连接"}
+        )
+        await websocket.close(code=4001)
+        return
+    credentials = consume_credential(ticket_payload.get("credential_ref"))
+    if credentials is None:
+        await websocket.accept()
+        await websocket.send_json(
+            {"type": "error", "data": "终端凭据已过期，请重新发起连接"}
+        )
+        await websocket.close(code=4001)
+        return
+    username = credentials.get("username", "")
+    password = credentials.get("password", "")
+    private_key = credentials.get("private_key", "")
+    if conn_type == "ssh" and not username:
+        username = "root"
 
     # --- Accept the WebSocket -------------------------------------------
     await websocket.accept(subprotocol=subprotocol)
@@ -813,20 +748,6 @@ async def terminal_ws(
         await websocket.close(code=4000)
         return
 
-    # --- Initialize session recorder -----------------------------------
-    session_id = str(uuid.uuid4())
-    recorder = SessionRecorder(
-        session_id=session_id,
-        device_id=device.id,
-        user_id=user_id_val,
-        device_name=device.name,
-        device_ip=device.ip_address or "",
-        ssh_username=username,
-        conn_type="ssh",
-        system_username=system_username_val,
-    )
-    recorder.initialize()
-
     # --- Establish SSH (TOFU host-key pinning) -------------------------
     session = None
     _toku_db = SessionLocal()
@@ -835,20 +756,25 @@ async def terminal_ws(
             device=device,
             username=username,
             password=password,
+            private_key=private_key or None,
             cols=80,
             rows=24,
             db=_toku_db,
+            initial_command=initial_command,
         )
 
         await websocket.send_json(
             {
                 "type": "connected",
-                "message": f"SSH connected to {device.ip_address}:{device.ssh_port}",
+                "message": (
+                    f"已进入容器 {container_val}"
+                    if container_val
+                    else f"SSH connected to {device.ip_address}:{device.ssh_port}"
+                ),
             }
         )
 
-        # Wrap read/write with recorder
-        async def read_with_recording():
+        async def read_ssh_output():
             try:
                 while session.is_connected:
                     output = await session.recv_output()
@@ -861,7 +787,6 @@ async def terminal_ws(
                         )
                         break
                     if output:
-                        recorder.record_output(output)
                         await websocket.send_json({"type": "output", "data": output})
                     await asyncio.sleep(0.01)
             except WebSocketDisconnect:
@@ -869,7 +794,7 @@ async def terminal_ws(
             except Exception:
                 logger.warning("SSH read loop ended unexpectedly", exc_info=True)
 
-        async def write_with_recording():
+        async def write_ssh_input():
             try:
                 while session.is_connected:
                     raw = await websocket.receive_text()
@@ -885,21 +810,12 @@ async def terminal_ws(
                     if msg_type == "input":
                         data = msg.get("data", "")
                         if data:
-                            should_forward, warning = recorder.process_input(data)
-                            if not should_forward:
-                                # Command blocked — immediately clear the
-                                # shell's input buffer so pending characters
-                                # are discarded.  Ctrl+U clears the line,
-                                # Ctrl+C sends SIGINT for a clean prompt.
-                                await session.send_input("\x15")
-                                await session.send_input("\x03")
-                                if warning:
-                                    await websocket.send_json(
-                                        {"type": "output", "data": warning}
-                                    )
-                                    recorder.record_output(warning)
-                            else:
-                                await session.send_input(data)
+                            await session.send_input(data)
+
+                    elif msg_type == "paste":
+                        data = msg.get("data", "")
+                        if data:
+                            await session.send_input(data)
 
                     elif msg_type == "resize":
                         try:
@@ -915,18 +831,25 @@ async def terminal_ws(
             except Exception:
                 logger.warning("SSH write loop ended unexpectedly", exc_info=True)
 
-        read_task = asyncio.create_task(read_with_recording())
-        write_task = asyncio.create_task(write_with_recording())
+        read_task = asyncio.create_task(read_ssh_output())
+        write_task = asyncio.create_task(write_ssh_input())
 
         done, pending = await asyncio.wait(
             [read_task, write_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+        for task in done:
+            try:
+                task.result()
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                pass
+            except Exception:
+                logger.warning("SSH terminal task ended unexpectedly", exc_info=True)
         for task in pending:
             task.cancel()
             try:
                 await task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, WebSocketDisconnect):
                 pass
 
     except ConnectionError as exc:
@@ -945,7 +868,6 @@ async def terminal_ws(
         except Exception:
             pass
     finally:
-        recorder.finish()
         _toku_db.close()
         if session is not None:
             await session.close()

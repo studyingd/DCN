@@ -2,180 +2,97 @@
   <el-dialog
     :model-value="visible"
     :title="isEdit ? '编辑设备' : '新建设备'"
-    width="600px"
+    width="640px"
+    class="device-form-dialog"
     @close="handleClose"
   >
-    <el-form
-      ref="formRef"
-      :model="formData"
-      :rules="formRules"
-      label-width="100px"
-      label-position="right"
-    >
+    <el-form ref="formRef" :model="formData" :rules="formRules" label-width="100px" label-position="right">
       <!-- 1. 设备名称（必填） -->
       <el-form-item label="设备名称" prop="name">
         <el-input v-model="formData.name" placeholder="请输入设备名称" />
       </el-form-item>
 
-      <!-- 2. 设备类型：服务器、主机、交换机、路由器、防火墙（必填） -->
+      <!-- 2. 设备类型：服务器、云服务器、台式主机（必填）。
+           交换机/路由器/防火墙已彻底下线，前后端均不再保留这三种设备类型。 -->
       <el-form-item label="设备类型" prop="type">
-        <el-select v-model="formData.type" placeholder="请选择设备类型" style="width: 100%">
+        <el-select v-model="formData.type" placeholder="请选择设备类型" style="width: 100%" @change="scheduleOsDetect">
           <el-option label="服务器" value="server" />
-          <el-option label="主机" value="host" />
-          <el-option label="交换机" value="switch" />
-          <el-option label="路由器" value="router" />
-          <el-option label="防火墙" value="firewall" />
+          <el-option label="云服务器" value="cloud_server" />
+          <el-option label="台式主机" value="host" />
         </el-select>
       </el-form-item>
 
       <!-- 3. IP 地址（必填） -->
       <el-form-item label="IP 地址" prop="ip_address" required>
-        <el-input v-model="formData.ip_address" placeholder="请输入 IP 地址" />
-      </el-form-item>
-
-      <!-- 4. 凭据绑定（必填） -->
-      <el-form-item label="绑定凭据" prop="credential_id" required>
-        <div style="display: flex; gap: 8px; width: 100%;">
-          <el-select
-            v-model="formData.credential_id"
-            placeholder="选择凭据（可选）"
-            clearable
-            style="flex: 1"
-          >
-            <el-option
-              v-for="c in credentialList"
-              :key="c.id"
-              :label="`${c.name} (${c.username})`"
-              :value="c.id"
-            />
-          </el-select>
-          <el-button size="default" @click="openCreateCredential">新建</el-button>
+        <el-input v-model="formData.ip_address" placeholder="请输入 IP 地址" @input="scheduleOsDetect" />
+        <div class="field-help">
+          输入 IP 后自动探测操作系统：Linux 显示 SSH 端口，Windows 显示 RDP / WinRM 端口；探测失败不影响设备创建。
         </div>
-      </el-form-item>
-
-      <!-- 快速新建凭据弹窗 -->
-      <el-dialog
-        v-model="credentialDialogVisible"
-        title="新建凭据"
-        width="420px"
-        :close-on-click-modal="false"
-        append-to-body
-      >
-        <el-form
-          ref="credentialFormRef"
-          :model="credentialForm"
-          :rules="credentialFormRules"
-          label-width="80px"
-        >
-          <el-form-item label="名称" prop="name">
-            <el-input v-model="credentialForm.name" placeholder="例：生产服务器 Root" />
-          </el-form-item>
-          <el-form-item label="用户名" prop="username">
-            <el-input v-model="credentialForm.username" placeholder="SSH/RDP 登录用户名" />
-          </el-form-item>
-          <el-form-item label="密码" prop="password">
-            <el-input
-              v-model="credentialForm.password"
-              type="password"
-              show-password
-              placeholder="请输入密码"
-            />
-          </el-form-item>
-        </el-form>
-        <template #footer>
-          <el-button @click="credentialDialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="credentialCreating" @click="handleCreateCredential">
-            创建并绑定
-          </el-button>
-        </template>
-      </el-dialog>
-
-      <!-- 5. 操作系统（仅服务器/主机显示）+ 检测按钮 -->
-      <el-form-item v-if="showOsField" label="操作系统" prop="os_system">
-        <div style="display: flex; gap: 8px; width: 100%;">
-          <el-select
-            v-model="formData.os_system"
-            placeholder="请选择操作系统"
-            style="flex: 1"
-            filterable
-            allow-create
-          >
-            <el-option label="Linux" value="linux" />
-            <el-option label="Windows" value="windows" />
-          </el-select>
-          <el-button
-            type="primary"
-            plain
-            :loading="detecting"
-            :disabled="!isValidIp(formData.ip_address)"
-            @click="handleDetectOS"
-          >
-            {{ detecting ? '检测中...' : '检测' }}
-          </el-button>
+        <div v-if="detecting" class="detect-status">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span>正在探测操作系统…</span>
         </div>
-        <!-- 检测结果提示 -->
-        <div v-if="detectResult" class="detect-result" :class="`confidence-${detectResult.confidence}`">
-          <span class="detect-text">{{ detectResult.detail }}</span>
-          <el-tag
-            v-if="detectResult.confidence === 'high'"
-            size="small"
-            type="success"
-            effect="plain"
-          >高可信度</el-tag>
-          <el-tag
-            v-else-if="detectResult.confidence === 'medium'"
-            size="small"
-            type="warning"
-            effect="plain"
-          >中可信度</el-tag>
-          <el-tag
-            v-else
-            size="small"
-            type="info"
-            effect="plain"
-          >低可信度</el-tag>
+        <div v-else-if="osLabel" class="detect-status">已识别：{{ osLabel }}</div>
+        <div v-else-if="detectUnidentified" class="detect-status is-muted">未能识别操作系统，可手动填写端口</div>
+        <div v-if="detectResult?.os_system === 'windows' && !detectResult.winrm_port_open" class="winrm-tools">
+          <el-button size="small" type="warning" plain @click="downloadWinrmScript"> 下载 WinRM 启用脚本 </el-button>
         </div>
-      </el-form-item>
-
-      <!-- 6. 业务地址（选填） -->
-      <el-form-item label="业务地址" prop="web_url">
-        <el-input v-model="formData.web_url" placeholder="例: http://192.168.1.1:8080" />
-      </el-form-item>
-
-      <!-- 7. 负责人（选填） -->
-      <el-form-item label="负责人" prop="owner">
-        <el-input v-model="formData.owner" placeholder="请输入负责人" />
-      </el-form-item>
-
-      <!-- 8. 用途（选填） -->
-      <el-form-item label="用途" prop="purpose">
-        <el-input
-          v-model="formData.purpose"
-          type="textarea"
-          :rows="2"
-          placeholder="请输入设备用途"
+        <el-alert
+          v-if="detectResult?.os_system === 'windows' && !detectResult.winrm_port_open"
+          class="winrm-alert"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="检测到 Windows，但 WinRM 端口未响应。可下载仅允许当前 DCN 出口 IP 访问的动态脚本，在目标机管理员 PowerShell 中运行。"
         />
       </el-form-item>
 
-      <!-- 机柜模式：U 位信息 -->
-      <template v-if="showPositionFields">
-        <el-form-item label="U 位位置" prop="position_u">
-          <el-input-number v-model="formData.position_u" :min="1" :max="100" />
+      <section class="form-section" aria-labelledby="remote-connection-title">
+        <div class="section-heading">
+          <div>
+            <h3 id="remote-connection-title">远程连接</h3>
+            <p>保存设备时自动加密并绑定连接信息，密码不会在页面中回显。</p>
+          </div>
+        </div>
+
+        <el-form-item label="用户名" prop="remote_username">
+          <el-input
+            v-model="formData.remote_username"
+            autocomplete="username"
+            placeholder="选填，不填写则不配置远程连接"
+          />
+        </el-form-item>
+        <el-form-item label="密码" prop="remote_password">
+          <el-input
+            v-model="formData.remote_password"
+            type="password"
+            show-password
+            autocomplete="new-password"
+            :placeholder="
+              isEdit && props.device?.has_credential ? '选填，留空则保持已有密码' : '选填，请与用户名一起填写'
+            "
+          />
+          <div class="field-help">
+            {{
+              isEdit && props.device?.has_credential
+                ? '清空用户名和密码并保存，将取消当前远程连接配置。'
+                : '用户名和密码均不填写时，不会创建远程连接配置。'
+            }}
+          </div>
         </el-form-item>
 
-        <el-form-item label="占用 U 数" prop="size_u">
-          <el-input-number v-model="formData.size_u" :min="1" :max="100" />
+        <el-form-item v-if="showSshPort" label="SSH 端口" prop="ssh_port">
+          <el-input v-model.number="formData.ssh_port" inputmode="numeric" placeholder="22" />
         </el-form-item>
-      </template>
 
-      <!-- 条件端口：服务器/主机 + Windows → RDP端口；其余 → SSH端口 -->
-      <el-form-item v-if="showRdpPort" label="RDP 端口" prop="rdp_port">
-        <el-input-number v-model="formData.rdp_port" :min="1" :max="65535" />
-      </el-form-item>
+        <el-form-item v-if="showWindowsPorts" label="RDP 端口" prop="rdp_port">
+          <el-input v-model.number="formData.rdp_port" inputmode="numeric" placeholder="3389" />
+        </el-form-item>
 
-      <el-form-item v-if="showSshPort" label="SSH 端口" prop="ssh_port">
-        <el-input-number v-model="formData.ssh_port" :min="1" :max="65535" />
-      </el-form-item>
+        <el-form-item v-if="showWindowsPorts" label="WinRM 端口" prop="winrm_port">
+          <el-input v-model.number="formData.winrm_port" inputmode="numeric" placeholder="5985" />
+        </el-form-item>
+      </section>
     </el-form>
 
     <template #footer>
@@ -190,70 +107,15 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Loading } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useDeviceStore } from '@/stores/device'
-import { credentialAPI, deviceAPI } from '@/api'
-import type { Device, Credential } from '@/types'
+import { deviceAPI } from '@/api'
+import type { Device, DeviceSavePayload } from '@/types'
+import { isOpsDevice } from '@/utils/deviceLabels'
+import { extractErrorDetail, readHeader } from '@/utils/apiError'
 
 const deviceStore = useDeviceStore()
-
-const credentialList = ref<Credential[]>([])
-
-async function loadCredentials() {
-  try {
-    const res = await credentialAPI.list()
-    credentialList.value = res.data
-  } catch { /* ignore */ }
-}
-
-// ── Inline credential creation ──
-const credentialDialogVisible = ref(false)
-const credentialCreating = ref(false)
-const credentialFormRef = ref<FormInstance>()
-
-interface CredentialFormData {
-  name: string
-  username: string
-  password: string
-}
-const credentialForm = reactive<CredentialFormData>({ name: '', username: '', password: '' })
-
-const credentialFormRules = reactive<FormRules<CredentialFormData>>({
-  name: [{ required: true, message: '请输入凭据名称', trigger: 'blur' }],
-  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
-  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
-})
-
-function openCreateCredential() {
-  credentialForm.name = ''
-  credentialForm.username = ''
-  credentialForm.password = ''
-  credentialFormRef.value?.clearValidate()
-  credentialDialogVisible.value = true
-}
-
-async function handleCreateCredential() {
-  const valid = await credentialFormRef.value?.validate().catch(() => false)
-  if (!valid) return
-
-  credentialCreating.value = true
-  try {
-    const res = await credentialAPI.create({
-      name: credentialForm.name,
-      username: credentialForm.username,
-      password: credentialForm.password,
-    })
-    ElMessage.success('凭据创建成功')
-    // Refresh list and auto-select the new credential
-    await loadCredentials()
-    formData.credential_id = res.data.id
-    credentialDialogVisible.value = false
-  } catch {
-    ElMessage.error('创建凭据失败')
-  } finally {
-    credentialCreating.value = false
-  }
-}
 
 const props = withDefaults(
   defineProps<{
@@ -267,7 +129,7 @@ const props = withDefaults(
     device: null,
     rackType: 'cabinet',
     presetU: null,
-  }
+  },
 )
 
 const emit = defineEmits<{
@@ -278,6 +140,11 @@ const emit = defineEmits<{
 const formRef = ref<FormInstance>()
 const submitting = ref(false)
 const detecting = ref(false)
+const detectResult = ref<DetectResult | null>(null)
+// 探测到的操作系统族，决定表单里显示 SSH 还是 RDP / WinRM 端口
+const detectedFamily = ref<'linux' | 'windows' | null>(null)
+const detectedLabel = ref<string | null>(null)
+const detectUnidentified = ref(false)
 
 interface DetectResult {
   ip_address: string
@@ -285,165 +152,217 @@ interface DetectResult {
   os_version: string
   ssh_banner: string | null
   ssh_port_open: boolean
+  winrm_port_open: boolean
   rdp_port_open: boolean
   smb_port_open: boolean
   confidence: string
   detail: string
 }
-const detectResult = ref<DetectResult | null>(null)
 
 function isValidIp(value: string): boolean {
   const ipRegex = /^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$/
   return ipRegex.test(value)
 }
 
-async function handleDetectOS() {
-  if (!isValidIp(formData.ip_address)) return
+function normalizeDetectedOs(result: DetectResult): string | null {
+  const osSystem = result.os_system?.trim().toLowerCase()
+  if (osSystem !== 'linux' && osSystem !== 'windows') return null
 
-  detecting.value = true
-  detectResult.value = null
+  const osVersion = result.os_version?.trim()
+  const versionLower = osVersion?.toLowerCase() ?? ''
+  const isGenericVersion =
+    versionLower === 'linux' ||
+    versionLower === 'windows' ||
+    versionLower.startsWith('linux (openssh)') ||
+    versionLower.startsWith('linux (dropbear)')
+  if (osVersion && !isGenericVersion) return osVersion
+  return osSystem
+}
+
+const LINUX_DISTRO_HINTS = [
+  'linux',
+  'ubuntu',
+  'debian',
+  'centos',
+  'rocky',
+  'almalinux',
+  'red hat',
+  'rhel',
+  'fedora',
+  'suse',
+  'arch',
+  'alpine',
+  'gentoo',
+  'anolis',
+  'kylin',
+  'uos',
+  'deepin',
+  'tencentos',
+  'opencloudos',
+  'uniontech',
+  '统信',
+  '麒麟',
+]
+
+// 设备里保存的 os_system 可能是精确版本串（如 "Rocky Linux 10.0"），
+// 统一归一到 linux / windows 两个族，用于决定端口字段的显隐。
+function osFamily(value?: string | null): 'linux' | 'windows' | null {
+  const normalized = value?.trim().toLowerCase() ?? ''
+  if (!normalized) return null
+  if (normalized.includes('windows')) return 'windows'
+  if (LINUX_DISTRO_HINTS.some((hint) => normalized.includes(hint))) return 'linux'
+  return null
+}
+
+function applyDetectResult(result: DetectResult | null) {
+  detectResult.value = result
+  const family = result ? osFamily(result.os_system) : null
+  detectedFamily.value = family
+  detectedLabel.value = result && family ? (normalizeDetectedOs(result) ?? result.os_system) : null
+}
+
+function requestOsDetect(ipAddress: string) {
+  return deviceAPI.detectOS(ipAddress, {
+    deviceId: props.device?.id,
+    username: formData.remote_username || undefined,
+    password: formData.remote_password || undefined,
+    winrmPort: formData.winrm_port,
+  })
+}
+
+async function detectOperatingSystem(): Promise<string | null> {
+  if (!supportsWindowsRemote.value || !isValidIp(formData.ip_address)) return null
+
+  // 同一 IP 的自动探测结果可直接复用(含失败:重试大概率同样失败,且
+  // 失败不影响保存——os_system 回退旧值)。避免点保存再同步探测一次
+  // 四个端口,把保存按钮卡住好几秒。
+  if (detectResult.value && detectResult.value.ip_address === formData.ip_address && detectedFamily.value) {
+    return normalizeDetectedOs(detectResult.value)
+  }
+
   try {
-    const res = await deviceAPI.detectOS(
-      formData.ip_address,
-      formData.credential_id ?? undefined,
-    )
-    detectResult.value = res.data
-
-    // Auto-fill the OS field with the detected version string
-    // e.g. "Rocky Linux 10.0", "Windows Server 2022", "Ubuntu 22.04"
-    // Falls back to os_system category if no version detail available
-    const osSystem = res.data.os_system
-    const osVersion = res.data.os_version
-
-    if (osSystem === 'linux' || osSystem === 'windows') {
-      // Use the detailed version string (e.g. "Rocky Linux 10.0")
-      // If version is just the generic category name, keep the category
-      const genericNames = new Set(['linux', 'windows', 'linux (openssh)', 'linux (dropbear)'])
-      const versionLower = osVersion.toLowerCase()
-      if (osVersion && !genericNames.has(versionLower)) {
-        formData.os_system = osVersion
-      } else {
-        formData.os_system = osSystem
-      }
-    } else if (osSystem === 'switch' || osSystem === 'router') {
-      // Network devices: keep as-is, they use SSH
-      formData.os_system = ''
-      // But still show the detection for reference
-    }
-
-    if (res.data.os_system !== 'unknown') {
-      ElMessage.success(`检测完成: ${res.data.os_version || res.data.os_system}`)
-    } else {
-      ElMessage.warning('未能识别操作系统，请手动选择')
-    }
+    const res = await requestOsDetect(formData.ip_address)
+    applyDetectResult(res.data)
+    return normalizeDetectedOs(res.data)
   } catch {
-    detectResult.value = {
-      ip_address: formData.ip_address,
-      os_system: 'unknown',
-      os_version: '',
-      ssh_banner: null,
-      ssh_port_open: false,
-      rdp_port_open: false,
-      smb_port_open: false,
-      confidence: 'low',
-      detail: '检测失败，请检查 IP 地址是否可达',
+    return null
+  }
+}
+
+// IP 输入停顿后自动探测，取代原来的「检测操作系统 / WinRM」按钮。
+let osDetectTimer: ReturnType<typeof setTimeout> | null = null
+let osDetectSeq = 0
+
+function scheduleOsDetect() {
+  if (osDetectTimer) clearTimeout(osDetectTimer)
+  osDetectTimer = setTimeout(() => {
+    osDetectTimer = null
+    void autoDetectOs()
+  }, 600)
+}
+
+function cancelOsDetect() {
+  if (osDetectTimer) {
+    clearTimeout(osDetectTimer)
+    osDetectTimer = null
+  }
+  osDetectSeq += 1
+  detecting.value = false
+}
+
+async function autoDetectOs() {
+  if (!props.visible) return
+  if (!supportsWindowsRemote.value || !isValidIp(formData.ip_address)) {
+    applyDetectResult(null)
+    detectUnidentified.value = false
+    return
+  }
+
+  const ipAddress = formData.ip_address
+  const seq = (osDetectSeq += 1)
+  detecting.value = true
+  try {
+    const res = await requestOsDetect(ipAddress)
+    // 输入已变化或对话框已关闭时丢弃过期结果
+    if (seq !== osDetectSeq || ipAddress !== formData.ip_address) return
+    applyDetectResult(res.data)
+    detectUnidentified.value = !detectedFamily.value
+  } catch {
+    if (seq === osDetectSeq && ipAddress === formData.ip_address) {
+      applyDetectResult(null)
+      detectUnidentified.value = true
     }
-    ElMessage.error('操作系统检测失败')
   } finally {
-    detecting.value = false
+    if (seq === osDetectSeq) detecting.value = false
+  }
+}
+
+async function downloadWinrmScript() {
+  if (!isValidIp(formData.ip_address)) return
+  try {
+    const res = await deviceAPI.downloadWinrmSetupScript(formData.ip_address, formData.winrm_port)
+    const url = URL.createObjectURL(res.data)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'dcn-enable-winrm.ps1'
+    link.click()
+    URL.revokeObjectURL(url)
+    const sourceIp = readHeader(res.headers, 'X-DCN-WinRM-Source-IP')
+    ElMessage.success(sourceIp ? `WinRM 启用脚本已下载（仅放行 DCN 出口 IP ${sourceIp}）` : 'WinRM 启用脚本已下载')
+  } catch (error: unknown) {
+    // 后端 detail 里是真实原因（目标 IP 无效 / IPv6 / 无法确定出口 IP），
+    // 不能统一说成「请检查目标 IP 和网络路由」。blob 错误体需先读成文本。
+    ElMessage.error(await extractErrorDetail(error, '脚本下载失败'))
   }
 }
 
 const isEdit = computed(() => !!props.device)
 
-const showPositionFields = computed(() => props.rackType === 'cabinet')
-
 interface FormData {
   name: string
   type: string
   ip_address: string
-  purpose: string
-  os_system: string
-  position_u: number | null
-  size_u: number | null
   ssh_port: number
   rdp_port: number
-  web_url: string
-  owner: string
-  credential_id: number | null
+  winrm_port: number
+  remote_username: string
+  remote_password: string
 }
 
 const defaultFormData = (): FormData => ({
   name: '',
   type: '',
   ip_address: '',
-  purpose: '',
-  os_system: '',
-  position_u: null,
-  size_u: 1,
   ssh_port: 22,
   rdp_port: 3389,
-  web_url: '',
-  owner: '',
-  credential_id: null,
+  winrm_port: 5985,
+  remote_username: '',
+  remote_password: '',
 })
 
 const formData = reactive<FormData>(defaultFormData())
 
-// 操作系统仅对服务器/主机显示
-const showOsField = computed(() => ['server', 'host'].includes(formData.type))
+// 纳管的三种类型(含云服务器)都可能是 Windows,都需要 RDP/WinRM 端口与 OS 探测。
+// 过去写死 ['server','host'] 会让云服务器跳过探测、os_system 为空,
+// 进而让监控/巡检/自动化错选 SSH 通道。
+const supportsWindowsRemote = computed(() => isOpsDevice(formData.type))
 
-// isWindows computed — uses substring match like backend get_target_type()
-const isWindowsOs = computed(() => {
-  if (!['server', 'host'].includes(formData.type)) return false
-  return (formData.os_system || '').toLowerCase().includes('windows')
+// Linux 只需 SSH；Windows 只需 RDP / WinRM；未识别时三者都保留，方便手工填写。
+const showSshPort = computed(() => !supportsWindowsRemote.value || detectedFamily.value !== 'windows')
+const showWindowsPorts = computed(() => supportsWindowsRemote.value && detectedFamily.value !== 'linux')
+const osLabel = computed(() => {
+  const label = detectedLabel.value?.trim() ?? ''
+  if (label.toLowerCase() === 'linux') return 'Linux'
+  if (label.toLowerCase() === 'windows') return 'Windows'
+  return label
 })
-
-// RDP 端口：仅服务器/主机 + Windows 时显示
-const showRdpPort = computed(() => isWindowsOs.value)
-
-// SSH 端口：非 (服务器/主机 + Windows) 即显示（即其他类型 或 服务器/主机+Linux）
-const showSshPort = computed(() => !isWindowsOs.value)
-
-// 当设备类型切换为非 server/host 时，清空 os_system
-watch(
-  () => formData.type,
-  () => {
-    if (!['server', 'host'].includes(formData.type)) {
-      formData.os_system = ''
-    }
-  }
-)
-
-// 当 IP 地址变化时，清除旧的检测结果
-watch(
-  () => formData.ip_address,
-  () => {
-    detectResult.value = null
-  }
-)
-
-// 当绑定凭据时，自动触发操作系统检测（仅新建，编辑时不触发）
-watch(
-  () => formData.credential_id,
-  (newVal, oldVal) => {
-    if (isEdit.value) return
-    if (newVal == null) return
-    if (newVal === oldVal) return
-    if (detecting.value) return
-    if (!isValidIp(formData.ip_address)) return
-    if (!showOsField.value) return
-    handleDetectOS()
-  }
-)
 
 const validateIpAddress = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
   if (!value) {
     callback(new Error('请输入 IP 地址'))
     return
   }
-  const ipRegex =
-    /^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$/
+  const ipRegex = /^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$/
   if (ipRegex.test(value)) {
     callback()
   } else {
@@ -451,43 +370,71 @@ const validateIpAddress = (_rule: unknown, value: string, callback: (error?: Err
   }
 }
 
+const validatePort = (_rule: unknown, value: number, callback: (error?: Error) => void) => {
+  const port = Number(value)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    callback(new Error('请输入 1-65535 之间的端口号'))
+    return
+  }
+  callback()
+}
+
 const formRules = reactive<FormRules<FormData>>({
   name: [{ required: true, message: '请输入设备名称', trigger: 'blur' }],
   type: [{ required: true, message: '请选择设备类型', trigger: 'change' }],
   ip_address: [{ required: true, validator: validateIpAddress, trigger: 'blur' }],
-  credential_id: [{ required: true, message: '请选择或新建凭据', trigger: 'change' }],
+  ssh_port: [{ validator: validatePort, trigger: 'blur' }],
+  rdp_port: [{ validator: validatePort, trigger: 'blur' }],
+  winrm_port: [{ validator: validatePort, trigger: 'blur' }],
+  remote_username: [
+    {
+      validator: (_rule, value, callback) => {
+        if (formData.remote_password && !value.trim()) callback(new Error('填写密码时必须填写用户名'))
+        else if (value && !value.trim()) callback(new Error('请输入有效的远程连接用户名'))
+        else callback()
+      },
+      trigger: 'blur',
+    },
+  ],
+  remote_password: [
+    {
+      validator: (_rule, value, callback) => {
+        if (formData.remote_username && !value && (!isEdit.value || !props.device?.has_credential))
+          callback(new Error('请同时填写远程连接密码'))
+        else callback()
+      },
+      trigger: 'blur',
+    },
+  ],
 })
 
 watch(
   () => props.visible,
   (val) => {
+    cancelOsDetect()
     if (val) {
-      detectResult.value = null
-      loadCredentials()
       if (props.device) {
         Object.assign(formData, {
           name: props.device.name,
           type: props.device.type,
           ip_address: props.device.ip_address,
-          purpose: props.device.purpose,
-          os_system: props.device.os_system,
-          position_u: props.device.position_u,
-          size_u: props.device.size_u ?? 1,
           ssh_port: props.device.ssh_port,
           rdp_port: props.device.rdp_port,
-          web_url: props.device.web_url,
-          owner: props.device.owner,
-          credential_id: props.device.credential_id,
+          winrm_port: props.device.winrm_port ?? 5985,
+          remote_username: props.device.credential_username || '',
+          remote_password: '',
         })
       } else {
         Object.assign(formData, defaultFormData())
-        if (props.presetU != null) {
-          formData.position_u = props.presetU
-        }
       }
+      // 编辑态先沿用已保存的识别结果；新建态清空，等 IP 输入后自动探测。
+      applyDetectResult(null)
+      detectedFamily.value = osFamily(props.device?.os_system)
+      detectedLabel.value = props.device?.os_system?.trim() || null
+      detectUnidentified.value = false
       formRef.value?.clearValidate()
     }
-  }
+  },
 )
 
 function handleClose() {
@@ -502,39 +449,43 @@ async function handleSubmit() {
 
   submitting.value = true
   try {
-    const payload: Partial<Device> = {
+    const detectedOs = await detectOperatingSystem()
+    const payload: DeviceSavePayload = {
       name: formData.name,
       type: formData.type,
       ip_address: formData.ip_address,
-      purpose: formData.purpose,
-      os_system: formData.os_system,
+      os_system: detectedOs ?? props.device?.os_system ?? undefined,
       ssh_port: formData.ssh_port,
       rdp_port: formData.rdp_port,
-      web_url: formData.web_url || null,
-      owner: formData.owner || null,
-      credential_id: formData.credential_id,
+      winrm_port: formData.winrm_port,
+      remote_credential:
+        formData.remote_username || formData.remote_password
+          ? {
+              username: formData.remote_username || undefined,
+              password: formData.remote_password || undefined,
+            }
+          : null,
     }
 
-    if (showPositionFields.value) {
-      payload.position_u = formData.position_u
-      payload.size_u = formData.size_u
-    } else {
-      payload.position_u = null
-      payload.size_u = null
-    }
+    payload.position_u = props.presetU ?? props.device?.position_u ?? null
+    payload.size_u = 2
 
     if (isEdit.value && props.device) {
-      await deviceStore.updateDevice(props.device.id, payload)
+      const saved = await deviceStore.updateDevice(props.device.id, payload)
+      if (!saved) throw new Error('更新设备失败')
       ElMessage.success('设备更新成功')
     } else {
-      await deviceStore.createDevice(props.rackId, payload)
+      const saved = await deviceStore.createDevice(props.rackId, payload)
+      if (!saved) throw new Error('创建设备失败')
       ElMessage.success('设备创建成功')
     }
 
     emit('saved')
     handleClose()
-  } catch {
-    ElMessage.error(isEdit.value ? '更新设备失败' : '创建设备失败')
+  } catch (error: unknown) {
+    // IP 查重等后端 422 的 detail 是真实原因(「IP 地址 x 已被设备 #y 使用」),
+    // 统一替换成笼统文案会让人摸不着头脑。
+    ElMessage.error(await extractErrorDetail(error, isEdit.value ? '更新设备失败' : '创建设备失败'))
   } finally {
     submitting.value = false
   }
@@ -542,52 +493,76 @@ async function handleSubmit() {
 </script>
 
 <style scoped>
-/* ── OS Detection result indicator ── */
-.detect-result {
+.form-section {
+  margin: var(--dcn-space-5) 0;
+  padding: var(--dcn-space-4) var(--dcn-space-4) var(--dcn-space-1);
+  border: 1px solid var(--dcn-border);
+  border-radius: var(--dcn-radius-lg);
+  background: var(--dcn-bg-section);
+}
+
+.section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: var(--dcn-space-4);
+}
+
+.section-heading h3 {
+  margin: 0;
+  color: var(--dcn-text-primary);
+  font-size: var(--dcn-text-md);
+  font-weight: 600;
+}
+
+.section-heading p {
+  margin: var(--dcn-space-1) 0 0;
+  color: var(--dcn-text-secondary);
+  font-size: var(--dcn-text-sm);
+  line-height: 1.5;
+}
+
+.field-help {
+  width: 100%;
+  margin-top: var(--dcn-space-1);
+  color: var(--dcn-text-placeholder);
+  font-size: var(--dcn-text-xs);
+  line-height: 1.5;
+}
+
+.detect-status {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  padding: 6px 10px;
-  border-radius: 6px;
-  font-size: 13px;
-  line-height: 1.4;
+  gap: var(--dcn-space-1);
+  width: 100%;
+  margin-top: var(--dcn-space-1);
+  color: var(--dcn-text-secondary);
+  font-size: var(--dcn-text-xs);
+  line-height: 1.5;
 }
 
-.detect-result .detect-icon {
-  font-size: 16px;
-  flex-shrink: 0;
+.detect-status.is-muted {
+  color: var(--dcn-text-placeholder);
 }
 
-.detect-result .detect-text {
-  flex: 1;
-  color: #606266;
+.winrm-tools {
+  width: 100%;
+  margin-top: var(--dcn-space-2);
 }
 
-.detect-result.confidence-high {
-  background: #f0f9eb;
-  border: 1px solid #c2e7b0;
+.winrm-alert {
+  width: 100%;
+  margin-top: var(--dcn-space-3);
 }
 
-.detect-result.confidence-high .detect-text {
-  color: #3d8b37;
+:global(.device-form-dialog .el-dialog__body) {
+  max-height: min(72vh, 760px);
+  overflow-y: auto;
 }
 
-.detect-result.confidence-medium {
-  background: #fdf6ec;
-  border: 1px solid #f5dab1;
-}
-
-.detect-result.confidence-medium .detect-text {
-  color: #b88230;
-}
-
-.detect-result.confidence-low {
-  background: #f5f7fa;
-  border: 1px solid #e4e7ed;
-}
-
-.detect-result.confidence-low .detect-text {
-  color: #909399;
+@media (max-width: 760px) {
+  .form-section {
+    padding-inline: var(--dcn-space-3);
+  }
 }
 </style>

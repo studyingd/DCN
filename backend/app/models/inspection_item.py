@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database import Base
+from app.database import Base, UTCDateTime
 
 
 class InspectionItemResult(Base):
@@ -35,7 +35,7 @@ class InspectionItemResult(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     command_used: Mapped[str | None] = mapped_column(Text, nullable=True)
     executed_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
+        UTCDateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
     )
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

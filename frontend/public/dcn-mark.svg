@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>DCN</title>
+  <rect width="64" height="64" rx="14" fill="#0d1422"/>
+  <path d="M17 18h12c10 0 17 6 17 14s-7 14-17 14H17V18Zm10 22c6 0 10-3 10-8s-4-8-10-8h-3v16h3Z" fill="#60a5fa"/>
+  <path d="M46 18h-7v28h7V18Z" fill="#22c55e"/>
+</svg>

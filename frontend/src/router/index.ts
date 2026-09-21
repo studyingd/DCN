@@ -1,7 +1,4 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import LoginView from '@/views/LoginView.vue'
-import DashboardView from '@/views/DashboardView.vue'
-import TerminalView from '@/views/TerminalView.vue'
 import { useAuthStore } from '@/stores/auth'
 
 /** Only allow same-origin relative redirect targets (no open-redirect to //host). */
@@ -18,19 +15,19 @@ const router = createRouter({
     {
       path: '/login',
       name: 'login',
-      component: LoginView,
+      component: () => import('@/views/LoginView.vue'),
       meta: { requiresAuth: false },
     },
     {
       path: '/terminal',
       name: 'terminal',
-      component: TerminalView,
+      component: () => import('@/views/TerminalView.vue'),
       meta: { requiresAuth: true },
     },
     {
       path: '/',
       name: 'dashboard',
-      component: DashboardView,
+      component: () => import('@/views/DashboardView.vue'),
       meta: { requiresAuth: true },
     },
     {
@@ -48,19 +45,23 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
-  // (Re)load the auth profile from the httpOnly cookie if not already loaded.
-  // This covers page refresh (no localStorage token anymore) and deep links.
-  if (!auth.isLoggedIn) {
-    await auth.fetchProfile()
-  }
-  const valid = auth.isLoggedIn
+  const requiresAuth = to.matched.some((record) => record.meta.requiresAuth)
 
-  if (to.meta.requiresAuth && !valid) {
+  if (to.name === 'login') {
+    if (auth.isLoggedIn) {
+      return { path: safeRedirect(to.query.redirect) }
+    }
+    return true
+  }
+
+  // Only protected routes should probe the httpOnly-cookie session. Public
+  // pages must not trigger the 401 -> refresh -> login redirect cycle.
+  if (requiresAuth && !auth.isLoggedIn) {
+    const valid = await auth.fetchProfile()
+    if (valid) return true
     return { name: 'login', query: { redirect: to.fullPath } }
   }
-  if (to.name === 'login' && valid) {
-    return { path: safeRedirect(to.query.redirect) }
-  }
+
   return true
 })
 

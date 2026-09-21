@@ -15,6 +15,7 @@ Revises: be8ccc757984
 Create Date: 2026-06-28 02:27:00.000000
 
 """
+
 from typing import Sequence, Union
 
 import sqlalchemy as sa
@@ -46,20 +47,22 @@ def upgrade() -> None:
     )
 
     # Remove exact-duplicate connection pairs so the unique constraint can apply.
+    # MySQL forbids deleting from a table while the same table is referenced by
+    # a subquery (error 1093).  A multi-table self-join delete is both native to
+    # MySQL and keeps the lowest id for every exact device pair.
     op.execute(
-        "DELETE FROM connections WHERE id NOT IN ("
-        "SELECT MIN(id) FROM connections GROUP BY device_a_id, device_b_id"
-        ")"
+        "DELETE duplicate FROM connections AS duplicate "
+        "INNER JOIN connections AS original "
+        "ON duplicate.device_a_id = original.device_a_id "
+        "AND duplicate.device_b_id = original.device_b_id "
+        "AND duplicate.id > original.id"
     )
-    # Batch mode so it also works on SQLite (which cannot ALTER TABLE ADD CONSTRAINT).
-    with op.batch_alter_table("connections") as batch_op:
-        batch_op.create_unique_constraint(
-            "uq_connection_pair", ["device_a_id", "device_b_id"]
-        )
+    op.create_unique_constraint(
+        "uq_connection_pair", "connections", ["device_a_id", "device_b_id"]
+    )
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("connections") as batch_op:
-        batch_op.drop_constraint("uq_connection_pair", type_="unique")
+    op.drop_constraint("uq_connection_pair", "connections", type_="unique")
     op.drop_column("devices", "ssh_host_key")
     op.drop_column("roles", "is_admin")

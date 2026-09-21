@@ -1,65 +1,89 @@
 /* ============================================================
-   DCN Design Tokens — Ongrid-inspired Dark Theme
-   Migrated from F:\Project\Ongrid zinc + purple palette.
+   DCN Design Tokens — Enterprise Operations Dark Theme
+   Dark is the default and only theme (:root). Subtrees that must be
+   explicitly dark (bigscreen / terminal) set data-theme="dark" on
+   their root — the [data-theme="dark"] selector re-applies these
+   values for that subtree.
    All components must reference these variables, never hardcode.
    ============================================================ */
 
-:root {
+html.dark,
+:root,
+[data-theme='dark'] {
   /* ── Page / Canvas ── */
-  --dcn-bg-page: #0b0b11;             /* near-zinc-950 + tiny purple cast */
-  --dcn-bg-section: #12121a;          /* slightly elevated section */
-  --dcn-bg-elevated: #16161e;         /* popovers, dropdowns */
-  --dcn-bg-card: #171721;             /* near-zinc-900 + purple cast — cards, sidebar */
-  --dcn-bg-muted: #1c1c28;            /* muted fill, hover states */
-  --dcn-bg-card-soft: rgba(23, 23, 32, 0.4);  /* translucent card fill */
+  --dcn-bg-page: #080d17;
+  --dcn-bg-section: #0d1422;
+  --dcn-bg-elevated: #111a2b;
+  --dcn-bg-card: #111827;
+  --dcn-bg-muted: #172235;
+  --dcn-bg-card-soft: rgba(17, 24, 39, 0.76);
+  --dcn-bg-subtle: #0b1220;
+  --dcn-bg-selected: rgba(59, 130, 246, 0.14);
 
-  /* ── Primary / Accent — Brand purple #8C6DF0 ── */
-  --dcn-primary: #8C6DF0;
-  --dcn-primary-light: #a58df5;
-  --dcn-primary-dark: #7356d9;
-  --dcn-primary-bg: rgba(140, 109, 240, 0.10);
-  --dcn-primary-bg-deep: rgba(140, 109, 240, 0.18);
+  /* ── Primary / Accent — Operations blue ── */
+  --dcn-primary: #3b82f6;
+  --dcn-primary-light: #60a5fa;
+  --dcn-primary-dark: #2563eb;
+  --dcn-primary-bg: rgba(59, 130, 246, 0.1);
+  --dcn-primary-bg-deep: rgba(59, 130, 246, 0.18);
 
   /* ── Status / Semantic ── */
-  --dcn-success: #10b981;             /* emerald-500 */
-  --dcn-success-light: rgba(16, 185, 129, 0.10);
+  --dcn-success: #22c55e;
+  --dcn-success-text: #86efac;
+  --dcn-success-bg: rgba(34, 197, 94, 0.1);
+  --dcn-success-light: rgba(16, 185, 129, 0.1);
   --dcn-success-dark: #059669;
-  --dcn-danger: #ef4444;              /* red-500 */
-  --dcn-danger-light: rgba(239, 68, 68, 0.10);
+  --dcn-danger: #f05252;
+  --dcn-danger-text: #fca5a5;
+  --dcn-danger-bg: rgba(240, 82, 82, 0.1);
+  --dcn-danger-light: rgba(239, 68, 68, 0.1);
   --dcn-danger-dark: #dc2626;
-  --dcn-warning: #f59e0b;             /* amber-500 */
-  --dcn-warning-light: rgba(245, 158, 11, 0.10);
+  --dcn-warning: #d97706;
+  --dcn-warning-text: #fbbf24;
+  --dcn-warning-bg: rgba(217, 119, 6, 0.1);
+  --dcn-warning-light: rgba(245, 158, 11, 0.1);
   --dcn-warning-dark: #d97706;
-  --dcn-info: #30a6d0;                /* cyan — Ongrid info token */
+  --dcn-info: #38bdf8;
 
   /* ── Text ── */
-  --dcn-text-primary: #f4f4f5;        /* zinc-100 */
-  --dcn-text-regular: #a1a1aa;        /* zinc-400 */
-  --dcn-text-secondary: #71717a;      /* zinc-500 */
-  --dcn-text-placeholder: #52525b;    /* zinc-600 */
+  --dcn-text-primary: #f1f5f9;
+  --dcn-text-regular: #cbd5e1;
+  --dcn-text-secondary: #94a3b8;
+  --dcn-text-placeholder: #64748b;
   --dcn-text-white: #ffffff;
 
   /* ── Border ── */
-  --dcn-border: #282832;              /* near-zinc-800 + cool */
-  --dcn-border-strong: #3f3f50;       /* zinc-700 equivalent */
-  --dcn-border-light: #1e1e2a;
-  --dcn-border-soft: rgba(40, 40, 50, 0.6);
+  --dcn-border: #223047;
+  --dcn-border-strong: #334155;
+  --dcn-border-light: #18243a;
+  --dcn-border-soft: rgba(34, 48, 71, 0.72);
+
+  /* ── Component-scoped fills (extracted so they switch with theme) ── */
+  --dcn-input-bg: #0b1220;
+  --dcn-input-bg-hover: #0f192a;
+  --dcn-table-header-bg: #0d1626;
+  --dcn-table-hover-bg: rgba(59, 130, 246, 0.08);
+  --dcn-scrollbar-thumb: rgba(100, 116, 139, 0.38);
+  --dcn-scrollbar-thumb-hover: rgba(148, 163, 184, 0.52);
+  --dcn-focus-ring: #60a5fa;
+  --dcn-rack-bg: #334155;
+  --dcn-login-card-bg: rgba(17, 24, 39, 0.92);
 
   /* ── Radius Scale ── */
   --dcn-radius-xs: 2px;
   --dcn-radius-sm: 4px;
   --dcn-radius-md: 6px;
   --dcn-radius-lg: 8px;
-  --dcn-radius-xl: 12px;
-  --dcn-radius-2xl: 16px;
+  --dcn-radius-xl: 10px;
+  --dcn-radius-2xl: 12px;
   --dcn-radius-pill: 20px;
   --dcn-radius-full: 50%;
 
   /* ── Shadow Scale (dark-mode appropriate) ── */
-  --dcn-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --dcn-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
-  --dcn-shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.5);
-  --dcn-shadow-xl: 0 12px 40px rgba(0, 0, 0, 0.6);
+  --dcn-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
+  --dcn-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.24);
+  --dcn-shadow-lg: 0 16px 36px rgba(0, 0, 0, 0.32);
+  --dcn-shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.42);
 
   /* ── Spacing (base 4px) ── */
   --dcn-space-1: 4px;
@@ -72,8 +96,9 @@
   --dcn-space-10: 40px;
 
   /* ── Typography ── */
-  --dcn-font-sans: 'Inter', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
-  --dcn-font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', 'Fira Code', Menlo, Monaco, 'Courier New', monospace;
+  --dcn-font-sans:
+    'Fira Sans', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+  --dcn-font-mono: 'Fira Code', ui-monospace, 'Cascadia Code', Menlo, Monaco, monospace;
 
   --dcn-text-xs: 11px;
   --dcn-text-sm: 12px;
@@ -85,84 +110,108 @@
   --dcn-text-3xl: 28px;
 
   /* ── Layout ── */
-  --dcn-sidebar-width: 180px;
-  --dcn-sidebar-collapsed-width: 56px;
-  --dcn-detail-width: 320px;
-  --dcn-topbar-height: 52px;
+  --dcn-sidebar-width: 200px;
+  --dcn-sidebar-collapsed-width: 64px;
+  --dcn-detail-width: 348px;
+  --dcn-topbar-height: 60px;
 
   /* ── Transition ── */
-  --dcn-transition-fast: 0.15s ease;
-  --dcn-transition-normal: 0.2s ease;
-  --dcn-transition-slow: 0.3s ease;
+  --dcn-transition-fast: 150ms ease;
+  --dcn-transition-normal: 220ms ease;
+  --dcn-transition-slow: 320ms ease;
 
   /* ── Topbar ── */
-  --dcn-topbar-bg: #171721;
-  --dcn-topbar-border: #282832;
+  --dcn-topbar-bg: rgba(8, 13, 23, 0.94);
+  --dcn-topbar-border: #18243a;
 
   /* ── Login Page ── */
-  --dcn-login-bg: #0b0b11;
-  --dcn-login-card-shadow: 0 24px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
-  --dcn-login-btn-gradient: linear-gradient(135deg, #8C6DF0 0%, #5269F4 100%);
+  --dcn-login-bg: #080d17;
+  --dcn-login-card-shadow: 0 28px 80px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(148, 163, 184, 0.04);
+  --dcn-login-btn-gradient: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%);
 
   /* ── Sidebar ── */
-  --dcn-sidebar-active-bg: #27272a;   /* zinc-800 */
-  --dcn-sidebar-active-border: #8C6DF0;
-  --dcn-sidebar-hover-bg: rgba(39, 39, 42, 0.6);
+  --dcn-sidebar-active-bg: rgba(59, 130, 246, 0.14);
+  --dcn-sidebar-hover-bg: rgba(148, 163, 184, 0.08);
 
   /* ── Device Type Colors ── */
-  --dcn-device-server: #60a5fa;       /* blue-400 */
-  --dcn-device-server-bg: rgba(96, 165, 250, 0.10);
-  --dcn-device-switch: #a78bfa;       /* violet-400 */
-  --dcn-device-switch-bg: rgba(167, 139, 250, 0.10);
-  --dcn-device-router: #34d399;       /* emerald-400 */
-  --dcn-device-router-bg: rgba(52, 211, 153, 0.10);
-  --dcn-device-firewall: #fbbf24;     /* amber-400 */
-  --dcn-device-firewall-bg: rgba(251, 191, 36, 0.10);
-  --dcn-device-host: #a1a1aa;         /* zinc-400 */
-  --dcn-device-host-bg: rgba(161, 161, 170, 0.10);
+  --dcn-device-server: #60a5fa; /* blue-400 */
+  --dcn-device-server-bg: rgba(96, 165, 250, 0.1);
+  --dcn-device-cloud-server: #22d3ee; /* cyan-400 */
+  --dcn-device-cloud-server-bg: rgba(34, 211, 238, 0.1);
+  --dcn-device-host: #a1a1aa; /* zinc-400 */
+  --dcn-device-host-bg: rgba(161, 161, 170, 0.1);
 
   /* ── Status Dot ── */
-  --dcn-dot-online: #10b981;          /* emerald-500 */
-  --dcn-dot-offline: #ef4444;         /* red-500 */
-  --dcn-dot-maintenance: #f59e0b;     /* amber-500 */
+  --dcn-dot-online: #22c55e;
+  --dcn-dot-offline: #f05252;
+  --dcn-dot-maintenance: #d97706;
 }
 
 /* ============================================================
-   Element Plus Dark Mode Overrides
+   Element Plus Dark Token Overrides (default + explicit dark)
    ============================================================ */
 
-:root {
-  /* Primary → Brand purple */
-  --el-color-primary: #8C6DF0;
-  --el-color-primary-light-3: #a58df5;
-  --el-color-primary-light-5: #bdacf8;
-  --el-color-primary-light-7: #d4ccfa;
-  --el-color-primary-light-8: #e2defc;
-  --el-color-primary-light-9: #f0eefd;
-  --el-color-primary-dark-2: #7356d9;
+html.dark,
+:root,
+[data-theme='dark'] {
+  /* Primary */
+  --el-color-primary: #3b82f6;
+  /* Element Plus uses light-7/8/9 as component fills. In a dark theme these
+     must remain dark tints, otherwise plain buttons/tags become white blocks. */
+  --el-color-primary-light-3: #316bc9;
+  --el-color-primary-light-5: #2857a2;
+  --el-color-primary-light-7: #20437c;
+  --el-color-primary-light-8: #1b3764;
+  --el-color-primary-light-9: #152b4c;
+  --el-color-primary-dark-2: #60a5fa;
+
+  /* Semantic colors */
+  --el-color-success: #22c55e;
+  --el-color-success-light-3: #1b9f4b;
+  --el-color-success-light-5: #177f3d;
+  --el-color-success-light-7: #145f31;
+  --el-color-success-light-8: #124d29;
+  --el-color-success-light-9: #103b21;
+  --el-color-warning: #d97706;
+  --el-color-warning-light-3: #b56607;
+  --el-color-warning-light-5: #915508;
+  --el-color-warning-light-7: #6d430a;
+  --el-color-warning-light-8: #57370b;
+  --el-color-warning-light-9: #412b0c;
+  --el-color-danger: #f05252;
+  --el-color-danger-light-3: #c94747;
+  --el-color-danger-light-5: #a13d3d;
+  --el-color-danger-light-7: #793333;
+  --el-color-danger-light-8: #622d2d;
+  --el-color-danger-light-9: #4a2727;
+  --el-color-info: #38bdf8;
 
   /* Backgrounds */
-  --el-bg-color: #171721;
-  --el-bg-color-page: #0b0b11;
-  --el-bg-color-overlay: #1c1c28;
-  --el-fill-color: #282832;
-  --el-fill-color-light: #1e1e2a;
-  --el-fill-color-lighter: #171721;
-  --el-fill-color-extra-light: #12121a;
-  --el-fill-color-blank: #171721;
+  --el-bg-color: #111827;
+  --el-bg-color-page: #080d17;
+  --el-bg-color-overlay: #111a2b;
+  --el-fill-color: #223047;
+  --el-fill-color-light: #18243a;
+  --el-fill-color-lighter: #111827;
+  --el-fill-color-extra-light: #0d1422;
+  --el-fill-color-dark: #2a3b55;
+  --el-fill-color-darker: #334155;
+  --el-fill-color-blank: #111827;
 
   /* Text */
-  --el-text-color-primary: #f4f4f5;
-  --el-text-color-regular: #a1a1aa;
-  --el-text-color-secondary: #71717a;
-  --el-text-color-placeholder: #52525b;
-  --el-text-color-disabled: #3f3f50;
+  --el-text-color-primary: #f1f5f9;
+  --el-text-color-regular: #cbd5e1;
+  --el-text-color-secondary: #94a3b8;
+  --el-text-color-placeholder: #64748b;
+  --el-text-color-disabled: #475569;
 
   /* Borders */
-  --el-border-color: #282832;
-  --el-border-color-light: #1e1e2a;
-  --el-border-color-lighter: #171721;
-  --el-border-color-extra-light: #12121a;
+  --el-border-color: #223047;
+  --el-border-color-dark: #334155;
+  --el-border-color-darker: #475569;
+  --el-border-color-light: #18243a;
+  --el-border-color-lighter: #142034;
+  --el-border-color-extra-light: #0d1422;
 
   /* Mask */
   --el-mask-color: rgba(0, 0, 0, 0.7);
@@ -173,8 +222,8 @@
   --el-border-radius-round: 20px;
 
   /* Font family */
-  --el-font-family: 'Inter', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --el-font-family-monospace: 'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;
+  --el-font-family: 'Fira Sans', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --el-font-family-monospace: 'Fira Code', ui-monospace, 'Cascadia Code', monospace;
 
   /* Transition */
   --el-transition-duration: 0.2s;
@@ -186,33 +235,53 @@
   --el-box-shadow-dark: 0 4px 16px rgba(0, 0, 0, 0.5);
 }
 
-/* ── EP Component Polish ── */
+/* ── EP Component Polish (vars resolve against the dark :root tokens) ── */
 
 .el-button--primary {
   font-weight: 500;
-  letter-spacing: 0.3px;
-  --el-button-bg-color: #8C6DF0;
-  --el-button-border-color: #8C6DF0;
-  --el-button-hover-bg-color: #a58df5;
-  --el-button-hover-border-color: #a58df5;
-  --el-button-active-bg-color: #7356d9;
-  --el-button-active-border-color: #7356d9;
+  letter-spacing: 0;
+  --el-button-bg-color: var(--dcn-primary);
+  --el-button-border-color: var(--dcn-primary);
+  --el-button-hover-bg-color: var(--dcn-primary-light);
+  --el-button-hover-border-color: var(--dcn-primary-light);
+  --el-button-active-bg-color: var(--dcn-primary-dark);
+  --el-button-active-border-color: var(--dcn-primary-dark);
 }
 
 .el-button--danger {
-  --el-button-bg-color: #ef4444;
-  --el-button-border-color: #ef4444;
+  --el-button-bg-color: var(--dcn-danger);
+  --el-button-border-color: var(--dcn-danger);
+}
+
+.el-button {
+  min-height: 34px;
+  border-radius: var(--dcn-radius-md);
+  font-weight: 500;
+  transition:
+    color var(--dcn-transition-fast),
+    background var(--dcn-transition-fast),
+    border-color var(--dcn-transition-fast),
+    box-shadow var(--dcn-transition-fast);
+}
+.el-button.is-circle {
+  min-width: 34px;
+}
+.el-button:focus-visible,
+.el-input__wrapper:focus-within,
+.el-select__wrapper:focus-within {
+  outline: 2px solid var(--dcn-focus-ring);
+  outline-offset: 2px;
 }
 
 .el-dialog {
-  border-radius: var(--dcn-radius-2xl) !important;
+  border-radius: var(--dcn-radius-xl) !important;
   background-color: var(--dcn-bg-card) !important;
   border: 1px solid var(--dcn-border) !important;
   overflow: hidden;
 }
 .el-dialog__header {
   border-bottom: 1px solid var(--dcn-border);
-  padding-bottom: 16px !important;
+  padding: 18px 20px 14px !important;
 }
 .el-dialog__title {
   color: var(--dcn-text-primary);
@@ -220,14 +289,15 @@
 }
 .el-dialog__body {
   color: var(--dcn-text-regular);
+  padding: 18px 20px !important;
 }
 .el-dialog__footer {
   border-top: 1px solid var(--dcn-border);
-  padding-top: 16px !important;
+  padding: 14px 20px 18px !important;
 }
 
 .el-tabs__item {
-  font-size: 13px;
+  font-size: var(--dcn-text-base);
   font-weight: 500;
   color: var(--dcn-text-regular);
 }
@@ -240,31 +310,193 @@
 }
 
 .el-tag {
-  border-radius: var(--dcn-radius-sm);
+  border-radius: var(--dcn-radius-md);
   font-weight: 500;
 }
 
 .el-input__wrapper {
-  border-radius: var(--dcn-radius-lg);
-  background-color: rgba(11, 11, 17, 0.4);
+  /* EP 的 wrapper 默认 content-box，min-height 会再叠加上下 padding，
+     导致 input 比同为 36px 的 select 高 2px，这里统一成 border-box */
+  box-sizing: border-box;
+  min-height: 36px;
+  border-radius: var(--dcn-radius-md);
+  background-color: var(--dcn-input-bg);
   box-shadow: 0 0 0 1px var(--dcn-border) inset;
   transition: all 0.2s ease;
 }
 .el-input__wrapper:hover {
+  background-color: var(--dcn-input-bg-hover);
   box-shadow: 0 0 0 1px var(--dcn-border-strong) inset;
 }
 .el-input__wrapper.is-focus {
   box-shadow: 0 0 0 1px var(--dcn-border-strong) inset;
 }
 
+/* Select 触发器(EP 2.5+ 的 .el-select__wrapper 默认取浅色主题变量,
+   在深色页面上会呈现白盒+深字,这里对齐 .el-input__wrapper 的深色样式;
+   高度与圆角同样与 input 保持一致，避免并排时大小不一) */
+.el-select__wrapper {
+  box-sizing: border-box;
+  min-height: 36px;
+  background-color: var(--dcn-input-bg);
+  box-shadow: 0 0 0 1px var(--dcn-border) inset;
+  border-radius: var(--dcn-radius-md);
+  transition: all 0.2s ease;
+}
+.el-select__wrapper:hover {
+  background-color: var(--dcn-input-bg-hover);
+  box-shadow: 0 0 0 1px var(--dcn-border-strong) inset;
+}
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--dcn-border-strong) inset;
+}
+.el-select__wrapper .el-select__selected-item,
+.el-select__wrapper .el-select__input {
+  color: var(--dcn-text-primary);
+}
+.el-select__wrapper .el-select__placeholder,
+.el-select__wrapper .el-select__input::placeholder {
+  color: var(--dcn-text-placeholder);
+}
+
+/* EP 的 el-select 样式是按需异步注入的(el-select-*.css)，文档顺序排在 tokens.css 之后，
+   同权重(0,1,0)时上面写的 min-height:36px 会被 EP 默认的 32px 覆盖回去；
+   而 .el-input__wrapper 在 EP 里没有 min-height，于是并排摆放时
+   input 36px / select 32px，高度差 4px 看着很别扭。这里用双类选择器提权锁定几何尺寸，
+   large / small 尺寸变体(.el-select--small .el-select__wrapper)权重相同且注入更晚，仍然生效。 */
+.el-input .el-input__wrapper,
+.el-select .el-select__wrapper {
+  box-sizing: border-box;
+  min-height: 36px;
+}
+
 .el-table {
   --el-table-bg-color: transparent;
   --el-table-tr-bg-color: transparent;
-  --el-table-header-bg-color: rgba(40, 40, 50, 0.3);
-  --el-table-row-hover-bg-color: rgba(39, 39, 42, 0.4);
+  --el-table-header-bg-color: var(--dcn-table-header-bg);
+  --el-table-row-hover-bg-color: var(--dcn-table-hover-bg);
   --el-table-border-color: var(--dcn-border);
   --el-table-text-color: var(--dcn-text-regular);
   --el-table-header-text-color: var(--dcn-text-primary);
+}
+.el-table .cell {
+  line-height: 20px;
+}
+.el-table td.el-table__cell {
+  padding: 9px 0;
+}
+.el-table th.el-table__cell {
+  padding: 10px 0;
+}
+.el-table,
+.el-table__inner-wrapper,
+.el-table__header-wrapper,
+.el-table__body-wrapper,
+.el-table__footer-wrapper,
+.el-table tr,
+.el-table td.el-table__cell,
+.el-table th.el-table__cell {
+  background-color: transparent;
+}
+.el-table th.el-table__cell {
+  background-color: var(--dcn-table-header-bg);
+}
+.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background-color: color-mix(in srgb, var(--dcn-bg-card) 72%, transparent);
+}
+.el-table__body tr.hover-row > td.el-table__cell,
+.el-table__body tr.current-row > td.el-table__cell,
+.el-table__body tr.el-table__row:hover > td.el-table__cell {
+  background-color: var(--dcn-table-hover-bg);
+}
+
+/* Dark surfaces for components rendered outside a panel (drawers/popovers)
+   and for the less frequently used Element Plus data components. */
+.el-drawer,
+.el-drawer__header,
+.el-drawer__body,
+.el-drawer__footer,
+.el-descriptions,
+.el-descriptions__body,
+.el-descriptions__table,
+.el-descriptions__cell,
+.el-tabs__content,
+.el-collapse,
+.el-collapse-item__wrap,
+.el-collapse-item__content,
+.el-pagination,
+.el-radio-button__inner,
+.el-date-editor.el-input__wrapper,
+.el-input-number__decrease,
+.el-input-number__increase {
+  color: var(--dcn-text-primary);
+}
+.el-drawer__header {
+  margin-bottom: 0 !important;
+  padding: 18px 20px 14px !important;
+  border-bottom: 1px solid var(--dcn-border);
+}
+.el-drawer__title {
+  color: var(--dcn-text-primary) !important;
+  font-size: var(--dcn-text-lg);
+  font-weight: 600;
+}
+.el-drawer__body {
+  padding: 18px 20px !important;
+}
+.el-drawer,
+.el-drawer__header,
+.el-drawer__body,
+.el-drawer__footer,
+.el-descriptions,
+.el-descriptions__body,
+.el-descriptions__table {
+  background-color: var(--dcn-bg-card) !important;
+}
+.el-tabs__content,
+.el-collapse,
+.el-collapse-item__wrap,
+.el-pagination {
+  background-color: transparent !important;
+}
+.el-descriptions__label.el-descriptions__cell.is-bordered-label {
+  background: var(--dcn-bg-section) !important;
+  color: var(--dcn-text-secondary) !important;
+}
+.el-descriptions__content.el-descriptions__cell.is-bordered-content {
+  background: var(--dcn-bg-card) !important;
+  color: var(--dcn-text-regular) !important;
+}
+.el-collapse-item__header,
+.el-collapse-item__content {
+  background: transparent !important;
+  color: var(--dcn-text-regular) !important;
+  border-color: var(--dcn-border) !important;
+}
+.el-radio-button__inner {
+  background: var(--dcn-bg-section) !important;
+  border-color: var(--dcn-border-strong) !important;
+  color: var(--dcn-text-regular) !important;
+  box-shadow: none !important;
+}
+.el-radio-button:first-child .el-radio-button__inner {
+  border-left-color: var(--dcn-border-strong) !important;
+}
+.el-radio-button__original-radio:checked + .el-radio-button__inner {
+  background: var(--dcn-primary) !important;
+  border-color: var(--dcn-primary) !important;
+  color: var(--dcn-text-white) !important;
+}
+.el-empty__description p,
+.el-loading-mask {
+  color: var(--dcn-text-secondary);
+}
+.el-loading-mask {
+  background-color: rgba(11, 11, 17, 0.72) !important;
+}
+.el-input-number,
+.el-input-number .el-input__wrapper {
+  background: transparent;
 }
 .el-table th.el-table__cell {
   font-weight: 600;
@@ -280,13 +512,39 @@
   font-weight: 500;
   color: var(--dcn-text-regular);
 }
+.el-form-item {
+  margin-bottom: 18px;
+}
+.el-textarea__inner {
+  border-radius: var(--dcn-radius-md);
+  background: var(--dcn-input-bg);
+  box-shadow: 0 0 0 1px var(--dcn-border) inset;
+  color: var(--dcn-text-primary);
+}
+.el-alert {
+  border: 1px solid color-mix(in srgb, currentColor 18%, var(--dcn-border));
+  border-radius: var(--dcn-radius-lg);
+}
+.el-pagination button,
+.el-pagination .el-pager li {
+  border-radius: var(--dcn-radius-md);
+}
+.el-progress-bar__outer {
+  background-color: var(--dcn-bg-muted) !important;
+}
+.el-switch__core {
+  border-color: var(--dcn-border-strong) !important;
+}
+.el-overlay {
+  backdrop-filter: blur(3px);
+}
 
 .el-popover.el-popper {
   background-color: var(--dcn-bg-card) !important;
   border: 1px solid var(--dcn-border) !important;
 }
 
-/* Dropdown Menu (el-dropdown) dark theme */
+/* Dropdown Menu (el-dropdown) */
 .el-dropdown__popper {
   background-color: var(--dcn-bg-card) !important;
   border: 1px solid var(--dcn-border) !important;
@@ -342,24 +600,46 @@
    ============================================================ */
 
 @keyframes dcn-rise {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: none; }
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 @keyframes dcn-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 @keyframes dcn-scale-in {
-  from { opacity: 0; transform: scale(0.97); }
-  to { opacity: 1; transform: none; }
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
-.dcn-anim-rise { animation: dcn-rise 240ms ease-out both; }
-.dcn-anim-fade { animation: dcn-fade-in 200ms ease-out both; }
-.dcn-anim-scale { animation: dcn-scale-in 180ms ease-out both; }
+.dcn-anim-rise {
+  animation: dcn-rise 240ms ease-out both;
+}
+.dcn-anim-fade {
+  animation: dcn-fade-in 200ms ease-out both;
+}
+.dcn-anim-scale {
+  animation: dcn-scale-in 180ms ease-out both;
+}
 
 /* ============================================================
-   Custom Scrollbars (Dark Theme)
+   Custom Scrollbars
    ============================================================ */
 
 ::-webkit-scrollbar {
@@ -370,11 +650,11 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(82, 82, 91, 0.4);
+  background: var(--dcn-scrollbar-thumb);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(113, 113, 122, 0.6);
+  background: var(--dcn-scrollbar-thumb-hover);
 }
 
 /* ============================================================
@@ -382,7 +662,27 @@
    ============================================================ */
 
 *:focus-visible {
-  outline: 2px solid #3f3f50;
+  outline: 2px solid var(--dcn-focus-ring);
   outline-offset: 2px;
   border-radius: 6px;
+}
+
+button,
+[role='button'],
+a,
+.el-button,
+.el-dropdown,
+.el-select {
+  touch-action: manipulation;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -5,12 +5,12 @@
 # ============================================================
 # Stage 1: Builder — install Python dependencies
 # ============================================================
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim-bookworm AS builder
 
 WORKDIR /app
 
 # Install build dependencies for native packages (bcrypt, cryptography)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     gcc \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # ============================================================
 # Stage 2: Production
 # ============================================================
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 # Labels
 LABEL maintainer="DCN Team" \
@@ -38,9 +38,15 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Install runtime dependencies only (MySQL client lib for pymysql)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install runtime helper.
+# fonts-wqy-microhei: 巡检报告 PDF 需要内嵌中文字体。基础镜像不带任何 CJK 字体，
+# 缺字体时报告会退回 reportlab 内置的 STSong-Light——那是不内嵌的 Adobe CID 字体，
+# 飞书桌面端预览用的 pdfium 不带 CJK 字体包，有渲染成空白方块的风险。
+# 注意不要换成 fonts-noto-cjk：NotoSansCJK-*.ttc 是 PostScript/CFF 轮廓，
+# reportlab 的 TTFont 只认 TrueType(glyf)，注册时直接报错（已在 bookworm 镜像实测）。
+RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     gosu \
+    fonts-wqy-microhei \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed packages from builder stage

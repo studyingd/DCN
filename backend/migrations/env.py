@@ -16,6 +16,13 @@ from sqlalchemy import engine_from_config, pool
 # Make the backend package importable (alembic runs from backend/).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# When the documented disposable-test command supplies TEST_DATABASE_URL,
+# promote it before importing app.config so Alembic cannot load the business
+# DATABASE_URL from .env by accident.  The application runtime intentionally
+# ignores TEST_DATABASE_URL (see app.config).
+if os.getenv("TEST_DATABASE_URL"):
+    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+
 import app.models  # noqa: E402,F401 — register all models on Base.metadata
 from app.config import DATABASE_URL  # noqa: E402
 from app.database import Base  # noqa: E402

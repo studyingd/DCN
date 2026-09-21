@@ -33,9 +33,9 @@ export default tseslint.config(
       },
     },
     rules: {
-      "vue/max-lines-per-block": ["warn", { style: 350, template: 350, skipBlankLines: true }],
-      "@typescript-eslint/no-explicit-any": "warn",
-      "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],
+      "vue/max-lines-per-block": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
       "no-empty": ["warn", { allowEmptyCatch: true }],
       "vue/multi-word-component-names": "off",
       "vue/no-v-html": "off",

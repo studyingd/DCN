@@ -1,7 +1,7 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { deviceAPI } from '@/api'
-import type { Device } from '@/types'
+import type { Device, DeviceSavePayload } from '@/types'
 
 export const useDeviceStore = defineStore('device', () => {
   const devices = ref<Device[]>([])
@@ -35,7 +35,7 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
-  async function createDevice(rackId: number, data: Partial<Device>): Promise<Device | null> {
+  async function createDevice(rackId: number, data: DeviceSavePayload): Promise<Device | null> {
     try {
       const res = await deviceAPI.create(rackId, data)
       devices.value.push(res.data)
@@ -45,7 +45,7 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
-  async function updateDevice(id: number, data: Partial<Device>): Promise<Device | null> {
+  async function updateDevice(id: number, data: DeviceSavePayload): Promise<Device | null> {
     try {
       const res = await deviceAPI.update(id, data)
       const index = devices.value.findIndex((d) => d.id === id)

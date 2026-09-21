@@ -15,32 +15,43 @@
     <div class="terminal-header">
       <div class="terminal-header-left">
         <span class="terminal-status-dot" :class="statusClass"></span>
-        <span class="terminal-conn-info">
-          {{ connType.toUpperCase() }} — {{ deviceIp }}
-        </span>
+        <span class="terminal-conn-info"> {{ connType.toUpperCase() }} — {{ deviceIp }} </span>
         <span v-if="statusText" class="terminal-status-text">{{ statusText }}</span>
       </div>
-      <div class="terminal-header-right">
+      <div v-if="showToolbar" class="terminal-header-right">
         <el-button
+          v-if="showWindowChrome"
           size="small"
           text
           class="terminal-header-btn power-btn-reboot"
-          @click="handlePower('reboot')"
           :loading="powerLoading === 'reboot'"
+          @click="handlePower('reboot')"
         >
           重启
         </el-button>
         <el-button
+          v-if="showWindowChrome"
           size="small"
           text
           class="terminal-header-btn power-btn-shutdown"
-          @click="handlePower('shutdown')"
           :loading="powerLoading === 'shutdown'"
+          @click="handlePower('shutdown')"
         >
           关机
         </el-button>
-        <el-divider direction="vertical" />
+        <el-divider v-if="showWindowChrome" direction="vertical" />
         <el-button
+          v-if="showFiles"
+          size="small"
+          :icon="FolderOpened"
+          text
+          class="terminal-header-btn"
+          @click="fileManagerVisible = true"
+        >
+          文件
+        </el-button>
+        <el-button
+          v-if="showWindowChrome"
           size="small"
           :icon="FullScreen"
           text
@@ -50,6 +61,7 @@
           全屏
         </el-button>
         <el-button
+          v-if="showWindowChrome"
           size="small"
           :icon="Close"
           text
@@ -64,7 +76,7 @@
     <!-- RDP display container (shown instead of terminal for RDP connections) -->
     <div v-if="connType === 'rdp'" class="terminal-rdp-container">
       <div v-if="connectionError" class="rdp-error">
-        <el-icon :size="32" color="#f56c6c"><WarningFilled /></el-icon>
+        <el-icon :size="32" color="var(--dcn-danger)"><WarningFilled /></el-icon>
         <p>{{ connectionError }}</p>
       </div>
       <div ref="rdpContainer" class="rdp-display"></div>
@@ -76,6 +88,18 @@
       <div ref="xtermContainer" class="terminal-xterm"></div>
       <div class="session-watermark" :style="watermarkStyle" />
     </div>
+
+    <!-- File manager: SSH uses REST/SFTP, RDP uses the GuacamoleFS drive -->
+    <FileManager
+      v-if="showFiles"
+      v-model="fileManagerVisible"
+      :conn-type="connType"
+      :device-id="deviceId"
+      :credential-id="credentialId ?? null"
+      :username="sshUsername"
+      :password="sshPassword"
+      :rdp-backend="rdpFileBackend"
+    />
   </div>
 </template>
 
@@ -89,12 +113,13 @@ import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import { Terminal } from 'xterm'
 import { FitAddon } from 'xterm-addon-fit'
 import { WebLinksAddon } from 'xterm-addon-web-links'
-import { FullScreen, Close, Monitor, WarningFilled } from '@element-plus/icons-vue'
+import { FullScreen, Close, WarningFilled, FolderOpened } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import 'xterm/css/xterm.css'
 
 import { useTerminal } from '@/composables/useTerminal'
 import { useGuacamole } from '@/composables/useGuacamole'
+import FileManager from './FileManager.vue'
 import { useAuthStore } from '@/stores/auth'
 import axios from 'axios'
 
@@ -111,12 +136,34 @@ const props = defineProps<{
   sshPassword?: string
   /** Stored credential ID — if set, backend resolves credentials server-side. */
   credentialId?: number | null
+  /** 非空时连接后自动 docker exec 进入该容器(仅 SSH/Linux)。 */
+  container?: string
+  /**
+   * 精简模式:嵌入抽屉等场景时隐藏电源/全屏/关闭等窗口工具栏。
+   *
+   * 注意：文件传输**不再**被 minimal 一刀切关掉——PVE 虚拟机控制台曾经因此
+   * 只能敲命令、不能传文件，和普通设备的远程连接体验不一致。用下面的开关单独控制。
+   */
+  minimal?: boolean
+  /** 文件传输是否可用；缺省跟随 !minimal。PVE 虚拟机传合成 target_id 即可用。 */
+  enableFiles?: boolean
+  /** Pre-issued ticket and WebSocket path (used by PVE guest consoles). */
+  ticket?: string
+  wsPath?: string
+  /** Keep the server-side RDP desktop resolution fixed and scale locally. */
+  fixedRdpResolution?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'fullscreen'): void
+  (e: 'connection-error', message: string): void
 }>()
+
+// 窗口级工具栏（电源/全屏/关闭）只在非嵌入模式下出现；文件传输可单独开启。
+const showWindowChrome = computed(() => !props.minimal)
+const showFiles = computed(() => props.enableFiles ?? !props.minimal)
+const showToolbar = computed(() => showWindowChrome.value || showFiles.value)
 
 // ----------------------------------------------------------------
 // Power control
@@ -132,31 +179,19 @@ const actionLabels: Record<string, string> = {
 async function handlePower(action: string) {
   const label = actionLabels[action] || action
   try {
-    await ElMessageBox.confirm(
-      `确定要对设备 ${props.deviceIp} 执行「${label}」操作吗？`,
-      '电源控制',
-      { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' },
-    )
+    await ElMessageBox.confirm(`确定要对设备 ${props.deviceIp} 执行「${label}」操作吗？`, '电源控制', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
   } catch {
     return
   }
 
   powerLoading.value = action
 
-  // For RDP: send shutdown keys through the existing Guacamole session
-  if (props.connType === 'rdp' && rdpConnected.value) {
-    try {
-      await rdpSendShutdown(action === 'reboot')
-      ElMessage.success(`${label}指令已通过 RDP 发送`)
-    } catch {
-      ElMessage.error(`${label}指令发送失败`)
-    } finally {
-      powerLoading.value = null
-    }
-    return
-  }
-
-  // For SSH (or RDP fallback): call the backend API (auth via httpOnly cookie)
+  // 电源操作统一走后端 API:Windows 经 WinRM,Linux 经 SSH,
+  // 指令发出后由后端探测端口确认真实离线。
   try {
     const res = await axios.post(
       `/api/devices/${props.deviceId}/power`,
@@ -184,10 +219,10 @@ async function handlePower(action: string) {
 // Refs
 // ----------------------------------------------------------------
 
-const terminalContainer = ref<HTMLDivElement>()
 const xtermContainer = ref<HTMLDivElement>()
 const rdpContainer = ref<HTMLDivElement>()
 const statusText = ref<string>('Connecting...')
+const fileManagerVisible = ref(false)
 
 // ----------------------------------------------------------------
 // Watermark
@@ -195,12 +230,18 @@ const statusText = ref<string>('Connecting...')
 const authStore = useAuthStore()
 
 const watermarkStyle = computed(() => {
-  // Username comes from the auth store profile (loaded from /api/auth/profile),
-  // not from decoding the JWT (which the SPA no longer holds).
+  // Watermark shows the LOGIN username (not display_name/role name) so the
+  // account is always uniquely attributable for audit/traceability. Username
+  // comes from the auth store profile (loaded from /api/auth/profile), not
+  // from decoding the JWT (which the SPA no longer holds).
   const username = authStore.user?.username ?? ''
-  const displayName = authStore.user?.display_name || username
   // Sanitize against XML injection in SVG
-  const safeName = displayName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
+  const safeName = username
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
   const now = new Date()
   const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
   const text = `${safeName}  ${dateStr}`
@@ -213,14 +254,7 @@ const watermarkStyle = computed(() => {
   }
 })
 
-const {
-  isConnected,
-  connectionError: sshError,
-  connect,
-  disconnect,
-  sendInput,
-  sendResize,
-} = useTerminal()
+const { isConnected, connectionError: sshError, connect, disconnect, sendInput, sendPaste, sendResize } = useTerminal()
 
 const {
   isConnected: rdpConnected,
@@ -229,9 +263,20 @@ const {
   disconnect: rdpDisconnect,
   sendSize: rdpSendSize,
   sendScale: rdpSendScale,
-  sendShutdown: rdpSendShutdown,
-  getDisplayCanvas: rdpGetDisplayCanvas,
+  isFilesystemReady: rdpFsReady,
+  listFiles: rdpListFiles,
+  uploadFile: rdpUploadFile,
+  downloadFile: rdpDownloadFile,
 } = useGuacamole()
+
+// Adapter handed to FileManager so the same dialog drives SSH (REST/SFTP) and
+// RDP (GuacamoleFS via the guacd object-stream protocol).
+const rdpFileBackend = {
+  isReady: rdpFsReady,
+  list: rdpListFiles,
+  upload: rdpUploadFile,
+  download: rdpDownloadFile,
+}
 
 const connectionError = computed(() => {
   return props.connType === 'rdp' ? rdpError.value : sshError.value
@@ -249,6 +294,8 @@ const statusClass = computed<'status-connecting' | 'status-connected' | 'status-
 
 let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
+// SSH clipboard-paste listener (capture phase) — kept so it can be torn down.
+let _sshPasteHandler: ((e: ClipboardEvent) => void) | null = null
 
 // ----------------------------------------------------------------
 // Lifecycle
@@ -293,10 +340,10 @@ function initTerminal() {
     fontSize: 14,
     fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", Menlo, Monaco, "Courier New", monospace', // kept as xterm requires literal font string; matches --dcn-font-mono
     theme: {
-      background: '#1e1e1e',
-      foreground: '#d4d4d4',
-      cursor: '#d4d4d4',
-      selectionBackground: '#264f78',
+      background: '#0d1422',
+      foreground: '#dbeafe',
+      cursor: '#60a5fa',
+      selectionBackground: '#1d4ed8',
       black: '#000000',
       red: '#cd3131',
       green: '#0dbc79',
@@ -336,9 +383,26 @@ function initTerminal() {
   term.onData((data: string) => {
     sendInput(data)
   })
+
+  // Forward SSH clipboard pastes through the dedicated message type. Capture
+  // phase + stopPropagation prevents xterm's own paste handler from also
+  // forwarding the text (which would double the input).
+  _sshPasteHandler = (e: ClipboardEvent) => {
+    const text = e.clipboardData?.getData('text/plain') ?? ''
+    if (text) {
+      e.preventDefault()
+      e.stopPropagation()
+      sendPaste(text)
+    }
+  }
+  xtermContainer.value.addEventListener('paste', _sshPasteHandler, true)
 }
 
 function destroyTerminal() {
+  if (_sshPasteHandler && xtermContainer.value) {
+    xtermContainer.value.removeEventListener('paste', _sshPasteHandler, true)
+    _sshPasteHandler = null
+  }
   disconnect()
   if (term) {
     term.dispose()
@@ -355,15 +419,23 @@ function openConnection() {
   connect({
     deviceId: props.deviceId,
     connType: props.connType,
-    username: props.sshUsername ?? 'root',
+    // When embedded in container management, credentials are intentionally
+    // omitted so the backend can resolve the device's saved remote username.
+    // Falling back to a hard-coded root here overrides that binding and makes
+    // non-root Docker hosts fail authentication.
+    username: props.sshUsername,
     password: props.sshPassword ?? '',
     credentialId: props.credentialId ?? undefined,
+    container: props.container || undefined,
+    ticket: props.ticket,
+    wsPath: props.wsPath,
     onOutput: (data: string) => {
       term?.write(data)
     },
     onError: (data: string) => {
       statusText.value = data
       term?.write(`\r\n\x1b[31m-- ${data} --\x1b[0m\r\n`)
+      emit('connection-error', data)
     },
     onConnected: (message: string) => {
       statusText.value = message
@@ -390,17 +462,25 @@ function openRdpConnection() {
     password: props.sshPassword ?? '',
     credentialId: props.credentialId,
     container: rdpContainer.value,
+    ticket: props.ticket,
+    wsPath: props.wsPath,
     onConnected: () => {
       statusText.value = `RDP — ${props.deviceIp}`
       scaleRdpDisplay()
+      // guacd applies the display-update resize asynchronously. Recalculate
+      // the local scale after the new framebuffer dimensions arrive; otherwise
+      // the old aspect ratio can leave a black strip below the desktop.
+      window.setTimeout(() => scaleRdpDisplay(), 350)
+      window.setTimeout(() => scaleRdpDisplay(), 900)
       // Auto-scale when container resizes
       if (rdpContainer.value && !rdpResizeObserver) {
-        rdpResizeObserver = new ResizeObserver(() => scaleRdpDisplay())
+        rdpResizeObserver = new ResizeObserver(() => scheduleResize())
         rdpResizeObserver.observe(rdpContainer.value)
       }
     },
     onError: (message: string) => {
       statusText.value = message
+      emit('connection-error', message)
     },
     onDisconnected: () => {
       statusText.value = 'Disconnected'
@@ -410,7 +490,7 @@ function openRdpConnection() {
 }
 
 function handleRdpDisconnect() {
-  // Server-side Guacamole instruction recording handles everything
+  // The Guacamole composable owns session teardown; no recording is persisted.
 }
 
 async function gracefulClose() {
@@ -427,7 +507,10 @@ function scaleRdpDisplay() {
   const rect = rdpContainer.value.getBoundingClientRect()
   const w = Math.round(rect.width)
   const h = Math.round(rect.height)
-  rdpSendSize(w, h)
+  // A larger server-side desktop means guacd must encode and push many more
+  // pixels. PVE consoles use a capped remote resolution and only scale the
+  // canvas locally when the browser window grows.
+  if (!props.fixedRdpResolution) rdpSendSize(w, h)
   rdpSendScale(w, h)
 }
 
@@ -470,7 +553,7 @@ function scheduleResize() {
   flex-direction: column;
   width: 100%;
   height: 100%;
-  background: #1e1e1e;
+  background: var(--dcn-bg-page);
   border-radius: var(--dcn-radius-md);
   overflow: hidden;
 }
@@ -481,8 +564,8 @@ function scheduleResize() {
   align-items: center;
   justify-content: space-between;
   padding: var(--dcn-space-1) var(--dcn-space-3);
-  background: #2d2d2d;
-  border-bottom: 1px solid #3c3c3c;
+  background: var(--dcn-bg-section);
+  border-bottom: 1px solid var(--dcn-border);
   flex-shrink: 0;
   user-select: none;
   position: relative;
@@ -522,27 +605,32 @@ function scheduleResize() {
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }
 
 .terminal-conn-info {
   font-size: var(--dcn-text-base);
   font-family: var(--dcn-font-mono);
-  color: #d4d4d4;
+  color: var(--dcn-text-primary);
 }
 
 .terminal-status-text {
   font-size: var(--dcn-text-sm);
-  color: #808080;
+  color: var(--dcn-text-secondary);
 }
 
 .terminal-header-btn {
-  color: #a0a4a8 !important;
+  color: var(--dcn-text-secondary) !important;
 }
 
 .terminal-header-btn:hover {
-  color: #d4d4d4 !important;
+  color: var(--dcn-text-primary) !important;
 }
 
 .power-btn-reboot:hover {
@@ -554,7 +642,7 @@ function scheduleResize() {
 }
 
 .terminal-header :deep(.el-divider--vertical) {
-  border-color: #4c4c4c;
+  border-color: var(--dcn-border-strong);
   height: var(--dcn-text-lg);
   margin: 0 var(--dcn-space-1);
 }
@@ -612,6 +700,13 @@ function scheduleResize() {
 
 .rdp-error p {
   margin: 0;
+}
+
+.clip-hint {
+  margin: 0 0 12px;
+  font-size: var(--dcn-text-sm);
+  color: var(--dcn-text-secondary, #909399);
+  line-height: 1.5;
 }
 
 /* ---------- Session watermark ---------- */

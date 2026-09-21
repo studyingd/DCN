@@ -1,14 +1,41 @@
-fastapi
-uvicorn[standard]
-sqlalchemy
-pyjwt
-passlib[bcrypt]
+# ── 运行时依赖（全部锁定确切版本）─────────────────────────────────────────
+# 这些版本就是当前 CI 与本地全量测试（350 个用例）跑通的组合。
+#
+# 为什么不再浮动：本文件此前几乎不 pin 版本，某次重建镜像时 FastAPI 自动升到
+# 0.141 —— include_router() 不再把子路由摊平进 app.routes，slowapi 因此解析不到
+# 任何 endpoint，全局 100/min 限流对所有路由静默失效（详见
+# app/middleware/rate_limiter.py 顶部注释）。这类破坏性变更不报错、不告警，只是
+# 悄悄改变行为。升级依赖请显式改这里，并在合并前跑完整测试。
+#
+# 本地同步：python -m pip install -r requirements.txt
+# 升级后回填版本号：python -m pip freeze | grep -i <pkg>
+
+fastapi==0.141.1
+# starlette 的版本本来由 fastapi 决定，但限流中间件直接依赖它的
+# BaseHTTPMiddleware / Match 语义，一并锁死，防止被间接抬版本。
+starlette==1.6.0
+uvicorn[standard]==0.52.4
+sqlalchemy==2.0.52
+pymysql==1.2.0
+pyjwt==2.13.0
+passlib[bcrypt]==1.7.4
+# passlib 1.7.4 读 bcrypt.__about__.__version__，与 bcrypt>=4.1 不兼容（会抛
+# AttributeError 并退化到不可用的 backend），必须钉在 4.0.1。
 bcrypt==4.0.1
-python-multipart
-paramiko
-slowapi
-python-dotenv
-cryptography
-alembic
-pydantic
-minio
+python-multipart==0.0.32
+paramiko==5.0.0
+pywinrm==0.5.0
+requests==2.34.2
+httpx==0.28.1
+slowapi==0.1.10
+# slowapi 的限流窗口/存储由 limits 实现，行为差异会直接影响限流正确性。
+limits==5.8.0
+python-dotenv==1.2.3
+cryptography==50.0.1
+alembic==1.19.2
+pydantic==2.13.5
+redis==6.4.0
+# 巡检报告 PDF 生成。选 reportlab 而不是 weasyprint/wkhtmltopdf 的原因：纯 Python
+# wheel，不引入 pango/cairo 等系统库，python:3.12-slim 镜像不用改 apt 层。
+# 中文渲染见 app/services/report_pdf.py 顶部的字体策略说明。
+reportlab==5.0.1

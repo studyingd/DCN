@@ -1,7 +1,11 @@
 # Development dependencies — install with: pip install -r requirements-dev.txt
-ruff>=0.11.0
-pytest>=8.0
-pytest-cov>=5.0
-httpx>=0.27.0       # for TestClient async support
-requests>=2.31       # for E2E tests
-websockets>=12.0     # for WebSocket E2E tests
+#
+# 与 requirements.txt 一样锁定确切版本：ruff 的新版本会引入新规则、pytest 的新
+# 版本会改收集行为，浮动版本会让「昨天还是绿的 CI 今天突然红」，排查成本远高于
+# 定期主动升级。升级后请本地跑一遍 lint + 全量测试再回填版本号。
+ruff==0.16.6
+pytest==9.1.1
+pytest-cov==7.1.0
+httpx==0.28.1          # for TestClient async support
+requests==2.34.2       # for E2E tests
+websockets==17.1       # for WebSocket E2E tests

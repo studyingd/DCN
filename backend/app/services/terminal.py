@@ -25,17 +25,22 @@ class SSHTerminalSession:
         device: Device,
         username: str,
         password: str,
+        private_key: Optional[str] = None,
         cols: int = 80,
         rows: int = 24,
         db=None,
+        initial_command: Optional[str] = None,
     ):
         self.device = device
         self.username = username
         self.password = password
+        self.private_key = private_key
         self.cols = cols
         self.rows = rows
         self.session_id = str(uuid.uuid4())
         self._db = db  # optional session for TOFU host-key persistence
+        # 连接建立后自动执行的命令(如 `docker exec -it <容器> sh` 进入容器)
+        self.initial_command = initial_command
 
         self._client: Optional[paramiko.SSHClient] = None
         self._channel: Optional[paramiko.Channel] = None
@@ -55,7 +60,8 @@ class SSHTerminalSession:
                 self.password,
                 db=self._db,
                 timeout=10,
-                banner_timeout=30,
+                banner_timeout=15,
+                private_key=self.private_key,
             )
         except HostKeyMismatchError as exc:
             raise ConnectionError(
@@ -78,11 +84,23 @@ class SSHTerminalSession:
                 f"Cannot reach {self.device.ip_address}:{self.device.ssh_port} — {exc}"
             ) from exc
 
-        self._channel = self._client.invoke_shell(
-            term="xterm-256color",
-            width=self.cols,
-            height=self.rows,
-        )
+        try:
+            self._channel = self._client.invoke_shell(
+                term="xterm-256color",
+                width=self.cols,
+                height=self.rows,
+            )
+        except Exception as exc:
+            # 认证已通过但 shell 开不起来(MaxSessions 耗尽、shell 被禁等):
+            # 必须关掉刚建立的 Transport,否则 TCP 连接与 paramiko 线程随重连累积。
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
+            raise ConnectionError(
+                f"SSH shell open failed for {self.device.ip_address}: {exc}"
+            ) from exc
 
         # Force UTF-8 locale so Chinese characters render correctly
         try:
@@ -98,6 +116,11 @@ class SSHTerminalSession:
         self._channel.send(
             "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>/dev/null\n".encode("utf-8")
         )
+
+        # 进入容器等场景:连接后自动执行指定命令(命令已在路由层校验)
+        if self.initial_command:
+            await asyncio.sleep(0.1)
+            self._channel.send((self.initial_command + "\n").encode("utf-8"))
 
     async def close(self) -> None:
         """Shut down the channel and client."""
@@ -160,11 +183,22 @@ async def create_ssh_connection(
     device: Device,
     username: str,
     password: str,
+    private_key: Optional[str] = None,
     cols: int = 80,
     rows: int = 24,
     db=None,
+    initial_command: Optional[str] = None,
 ) -> SSHTerminalSession:
     """Convenience wrapper — create and connect in one call."""
-    session = SSHTerminalSession(device, username, password, cols, rows, db=db)
+    session = SSHTerminalSession(
+        device=device,
+        username=username,
+        password=password,
+        private_key=private_key,
+        cols=cols,
+        rows=rows,
+        db=db,
+        initial_command=initial_command,
+    )
     await session.connect()
     return session

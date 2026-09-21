@@ -30,11 +30,15 @@ frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
 frontend/.vite/
+frontend/components.d.ts
 
 # ── Top-level npm (Playwright / test tooling only — not part of the app) ────
 node_modules/
-package.json
-package-lock.json
+# 必须带前导斜杠锚定到仓库根：不锚定会连 frontend/package.json 与
+# frontend/package-lock.json 一起忽略，导致全新 checkout 里没有前端依赖清单，
+# npm ci / vite build / Dockerfile.frontend 全部失败。
+/package.json
+/package-lock.json
 
 # ── Environment & secrets ───────────────────────────────────────────────────
 .env
@@ -76,6 +80,9 @@ backend/*.db
 # ── Test & coverage ─────────────────────────────────────────────────────────
 .pytest_cache/
 backend/.pytest_cache/
+# ruff 的增量缓存，仓库根与 backend/ 下都会生成（取决于从哪层调用）
+.ruff_cache/
+backend/.ruff_cache/
 .coverage
 htmlcov/
 .tox/
@@ -101,3 +108,12 @@ test-results/
 *.tmp
 *.orig
 *~
+
+# ── 本地运行产物 / 工具目录 ─────────────────────────────────────────────────
+# .run/ 是本地起服务时的 stdout/stderr 落盘目录（含 .err/.out，不匹配 *.log）；
+# .npm-global/ 是本机 npm 全局前缀，都不该进版本库。
+.run/
+.npm-global/
+
+# ── 本地文档 ────────────────────────────────────────────────────────────────
+*.docx

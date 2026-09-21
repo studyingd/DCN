@@ -44,34 +44,38 @@ jobs:
       - name: Install backend dependencies
         run: |
           pip install -r backend/requirements.txt
-          pip install ruff pytest httpx
+          # 与 ci.yml 一致：从锁定版本的 requirements-dev.txt 安装，
+          # 避免 ruff/pytest 浮动版本让发布流水线的判定与 PR 流水线不一致。
+          pip install -r backend/requirements-dev.txt
 
       - name: Backend lint
-        run: ruff check backend/
+        working-directory: ./backend
+        run: ruff check .
+
+      - name: Backend format check
+        working-directory: ./backend
+        run: ruff format --check .
 
       - name: Init test database
         working-directory: ./backend
         env:
           DATABASE_URL: mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test
-        run: |
-          python -c "
-          import os
-          os.environ.setdefault('DATABASE_URL', 'mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test')
-          from app.database import Base, engine
-          Base.metadata.create_all(bind=engine)
-          "
+          JWT_SECRET: ci-test-jwt-secret
+          CREDENTIAL_SECRET_KEY: ci-test-credential-key-32bytes!!
+          ADMIN_PASSWORD: ci-test-admin-password
+        run: python -m alembic upgrade head
 
       - name: Backend tests
         working-directory: ./backend
         env:
-          DATABASE_URL: mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test
+          TEST_DATABASE_URL: mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test
           JWT_SECRET: ci-test-jwt-secret
           CREDENTIAL_SECRET_KEY: ci-test-credential-key-32bytes!!
-          MINIO_ACCESS_KEY: ci-test-minio-access-key
-          MINIO_SECRET_KEY: ci-test-minio-secret-key
           ADMIN_USERNAME: admin
           ADMIN_PASSWORD: ci-test-admin-password
-        run: python -m pytest . -v --tb=short
+        # 覆盖率下限只在 ci.yml 里卡：每个 PR 都会跑，main 上的代码已经达标；
+        # 发布流水线重复卡一遍只会在打 tag 时挡住发版，没有额外信息量。
+        run: python -m pytest tests -v --tb=short -m "not e2e"
 
       # --- Frontend ---
       - name: Setup Node.js
@@ -91,8 +95,15 @@ jobs:
 
       - name: Frontend lint
         working-directory: ./frontend
-        run: npx eslint src
-        continue-on-error: true
+        run: npm run lint
+
+      - name: Frontend format check
+        working-directory: ./frontend
+        run: npm run format:check
+
+      - name: Frontend unit tests
+        working-directory: ./frontend
+        run: npm run test:unit
 
       - name: Frontend build
         working-directory: ./frontend

@@ -9,6 +9,9 @@ on:
 
 env:
   PYTHON_VERSION: '3.12'
+  # 后端覆盖率下限。当前实际约 54%，留出少量缓冲；提升后请同步上调，
+  # 让这个数字只涨不跌，防止新代码不带测试把覆盖率拖下去。
+  COV_FLOOR: '50'
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════
@@ -27,10 +30,19 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install ruff
-        run: pip install ruff
+        working-directory: ./backend
+        # 版本以 requirements-dev.txt 为唯一来源，避免 CI 与本地 lint 规则漂移
+        run: pip install "$(grep -E '^ruff==' requirements-dev.txt)"
 
       - name: Run ruff check
-        run: ruff check backend/
+        working-directory: ./backend
+        # 用 "." 而不是枚举目录：backend/ 下还有 init_db.py、migrate_rack_24u.py
+        # 这类顶层脚本，枚举容易漏。ruff 默认排除 .venv/__pycache__。
+        run: ruff check .
+
+      - name: Run ruff format check
+        working-directory: ./backend
+        run: ruff format --check .
 
   # ═══════════════════════════════════════════════════════════════════
   # 2. Frontend Lint — ESLint + TypeScript type check
@@ -59,8 +71,36 @@ jobs:
 
       - name: Run ESLint
         working-directory: ./frontend
-        run: npx eslint src
-        continue-on-error: true
+        run: npm run lint
+
+      - name: Run Prettier format check
+        working-directory: ./frontend
+        run: npm run format:check
+
+  # ═══════════════════════════════════════════════════════════════════
+  # 2b. Frontend Test — vitest unit tests for pure utils
+  # ═══════════════════════════════════════════════════════════════════
+  frontend-test:
+    name: Frontend Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Run unit tests
+        working-directory: ./frontend
+        run: npm run test:unit
 
   # ═══════════════════════════════════════════════════════════════════
   # 3. Backend Test — pytest with MySQL service
@@ -96,33 +136,28 @@ jobs:
         working-directory: ./backend
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-cov httpx
+          pip install -r requirements-dev.txt
 
       - name: Init test database
         working-directory: ./backend
         env:
           DATABASE_URL: mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test
-        run: |
-          python -c "
-          import os
-          os.environ.setdefault('DATABASE_URL', 'mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test')
-          from app.database import Base, engine
-          Base.metadata.create_all(bind=engine)
-          print('Test database tables created.')
-          "
+          JWT_SECRET: ci-test-jwt-secret-do-not-use-in-production
+          CREDENTIAL_SECRET_KEY: ci-test-credential-key-32bytes!!
+          ADMIN_PASSWORD: ci-test-admin-password
+        run: python -m alembic upgrade head
 
       - name: Run pytest
         working-directory: ./backend
         env:
-          DATABASE_URL: mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test
+          TEST_DATABASE_URL: mysql+pymysql://root:dcn_test_pass@127.0.0.1:3306/dcn_test
           JWT_SECRET: ci-test-jwt-secret-do-not-use-in-production
           CREDENTIAL_SECRET_KEY: ci-test-credential-key-32bytes!!
-          MINIO_ACCESS_KEY: ci-test-minio-access-key
-          MINIO_SECRET_KEY: ci-test-minio-secret-key
           ADMIN_USERNAME: admin
           ADMIN_PASSWORD: ci-test-admin-password
         run: |
-          python -m pytest . -v --tb=short
+          python -m pytest tests -v --tb=short -m "not e2e" \
+            --cov=app --cov-report=term --cov-fail-under=${{ env.COV_FLOOR }}
 
   # ═══════════════════════════════════════════════════════════════════
   # 4. Frontend Build — Vite production build
@@ -130,7 +165,7 @@ jobs:
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
-    needs: [frontend-lint]
+    needs: [frontend-lint, frontend-test]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -171,7 +206,7 @@ jobs:
           JWT_SECRET: ci-test
           ADMIN_PASSWORD: ci-test
           CREDENTIAL_SECRET_KEY: ci-test
-        run: docker compose -f docker-compose.yml config --quiet
+        run: docker compose -f docker/docker-compose.yml config --quiet
 
       - name: Build Backend image (verify only)
         uses: docker/build-push-action@v5

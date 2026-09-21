@@ -25,14 +25,21 @@ def list_racks(
     if not room:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="机房不存在")
     racks = db.query(Rack).filter(Rack.room_id == room_id).order_by(Rack.id).all()
+    rack_ids = [rack.id for rack in racks]
+    counts = (
+        dict(
+            db.query(Device.rack_id, func.count(Device.id))
+            .filter(Device.rack_id.in_(rack_ids))
+            .group_by(Device.rack_id)
+            .all()
+        )
+        if rack_ids
+        else {}
+    )
     result = []
     for rack in racks:
-        device_count = (
-            db.query(func.count(Device.id)).filter(Device.rack_id == rack.id).scalar()
-            or 0
-        )
         resp = RackResponse.model_validate(rack)
-        resp.device_count = device_count
+        resp.device_count = counts.get(rack.id, 0)
         result.append(resp)
     return result
 
@@ -56,11 +63,7 @@ def create_rack(
         room_id=room_id,
         name=body.name,
         type=body.type,
-        position_x=body.position_x,
-        position_y=body.position_y,
-        position_z=body.position_z,
-        rotation=body.rotation,
-        capacity_u=body.capacity_u,
+        capacity_u=24 if body.type == "cabinet" else None,
     )
     db.add(rack)
     db.commit()
@@ -82,10 +85,19 @@ def update_rack(
     if not rack:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="机架不存在")
     update_data = body.model_dump(exclude_unset=True)
+    # 仅在请求显式变更了机架类型时才回写 capacity_u;cabinet 归一为 24,
+    # 其它类型清空。否则一次改名/挪位就会把 shelf 既有的容量抹掉。
+    if "type" in update_data:
+        target_type = update_data["type"]
+        update_data["capacity_u"] = 24 if target_type == "cabinet" else None
     apply_update(
         rack,
         update_data,
-        ["name", "type", "position_x", "position_y", "position_z", "rotation", "capacity_u"],
+        [
+            "name",
+            "type",
+            "capacity_u",
+        ],
     )
     db.commit()
     db.refresh(rack)

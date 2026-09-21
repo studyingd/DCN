@@ -1,34 +1,51 @@
 /**
  * Shared inspection item type labels.
- * Single source of truth — import from here instead of duplicating.
+ * Single source of truth — import from here instead of duplicating mappings.
+ *
+ * The keys MUST match the backend `item_type` values produced by
+ * `backend/app/services/inspection_commands.py` (LINUX_COMMANDS /
+ * WINDOWS_COMMANDS) — that is the namespace stored in
+ * `inspection_item_results.item_type` and rendered here.
+ * `backend/tests/test_inspection_label_parity.py` pins the key set on both
+ * sides, so adding an inspection item without a label fails CI.
+ *
+ * Label *text* may legitimately differ from the backend's own ITEM_LABELS
+ * (the backend wording is used for the custom-mode checkbox catalog, these are
+ * sized for table columns); only the key set is a contract.
  */
 
 export const ITEM_LABELS: Record<string, string> = {
-  cpu_usage: 'CPU 使用率',
-  memory_usage: '内存使用率',
-  disk_usage: '磁盘使用率',
-  disk_io: '磁盘 I/O',
-  network_io: '网络 I/O',
-  process_count: '进程数',
-  uptime: '运行时间',
+  // Linux 主机
+  cpu: 'CPU 使用率',
+  memory: '内存使用',
+  disk: '磁盘使用',
+  load: '系统负载',
+  network: '网络配置',
+  ports: '监听端口',
+  processes: '进程列表',
   os_version: '系统版本',
-  load_average: '负载均值',
-  temperature: '温度',
-  fan_status: '风扇状态',
-  power_status: '电源状态',
-  interface_status: '接口状态',
-  route_table: '路由表',
-  arp_table: 'ARP 表',
-  vlan_info: 'VLAN 信息',
-  firewall_rules: '防火墙规则',
-  nat_rules: 'NAT 规则',
-  vpn_status: 'VPN 状态',
-  bgp_status: 'BGP 状态',
-  ospf_status: 'OSPF 状态',
-  dhcp_status: 'DHCP 状态',
-  dns_status: 'DNS 状态',
-  ntp_status: 'NTP 状态',
-  log_check: '日志检查',
-  security_check: '安全检查',
-  backup_status: '备份状态',
+  logs: '异常日志',
+  failed_services: '失败服务',
+  firewall: '防火墙',
+  security_updates: '安全更新',
+  logins: '登录记录',
+  // Windows 主机
+  system_info: '系统信息',
+  // 后端改查 SCM 失败事件（7000/7009/7031…）后，这一项统计的是「真的挂了的服务」，
+  // 不再是「停着的自动服务」，所以叫「服务异常」而不是「失败服务」。
+  services: '服务异常',
+  event_logs: '事件日志',
+  updates: '已装补丁',
+  uptime: '运行时间',
+}
+
+/**
+ * Human-readable label for an inspection `item_type`.
+ * Unknown types fall back to the raw key so new backend items stay visible
+ * instead of rendering as blank. Uses hasOwnProperty because a plain
+ * `ITEM_LABELS[type] || type` would resolve prototype keys — e.g.
+ * `getItemLabel('constructor')` would return the Object constructor.
+ */
+export function getItemLabel(type: string): string {
+  return Object.prototype.hasOwnProperty.call(ITEM_LABELS, type) ? ITEM_LABELS[type] : type
 }

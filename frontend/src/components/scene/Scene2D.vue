@@ -13,12 +13,16 @@
           <h2>{{ currentRoom.name }}</h2>
           <span class="view-header-sub">
             {{ currentRoom.location || '无位置信息' }}
-            <el-tag size="small" type="info" style="margin-left: 8px;">
+            <el-tag size="small" type="info" style="margin-left: 8px">
               {{ rackList.length }} 个机柜 · {{ totalDeviceCount }} 台设备
             </el-tag>
           </span>
         </div>
         <div class="view-header-actions">
+          <el-button :loading="statusScanning" @click="onScanStatuses">
+            <el-icon v-if="!statusScanning"><Refresh /></el-icon>
+            刷新状态
+          </el-button>
           <el-button v-if="authStore.hasPermission('device:manage')" @click="openEditRoom">
             <el-icon><Edit /></el-icon>
             编辑
@@ -35,76 +39,36 @@
       </div>
 
       <div v-if="rackList.length === 0" class="empty-state">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" style="color: var(--dcn-text-placeholder);">
-          <rect x="4" y="2" width="16" height="20" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-          <rect x="6.5" y="4.5" width="11" height="3" rx="0.5" fill="currentColor" opacity="0.7"/>
-          <rect x="6.5" y="9" width="11" height="3" rx="0.5" fill="currentColor" opacity="0.7"/>
-          <rect x="6.5" y="13.5" width="11" height="3" rx="0.5" fill="currentColor" opacity="0.7"/>
-          <circle cx="15.5" cy="6" r="0.7" fill="currentColor"/>
-          <circle cx="15.5" cy="10.5" r="0.7" fill="currentColor"/>
-          <circle cx="15.5" cy="15" r="0.7" fill="currentColor"/>
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" style="color: var(--dcn-text-placeholder)">
+          <rect x="4" y="2" width="16" height="20" rx="1.5" stroke="currentColor" stroke-width="1.5" />
+          <rect x="6.5" y="4.5" width="11" height="3" rx="0.5" fill="currentColor" opacity="0.7" />
+          <rect x="6.5" y="9" width="11" height="3" rx="0.5" fill="currentColor" opacity="0.7" />
+          <rect x="6.5" y="13.5" width="11" height="3" rx="0.5" fill="currentColor" opacity="0.7" />
+          <circle cx="15.5" cy="6" r="0.7" fill="currentColor" />
+          <circle cx="15.5" cy="10.5" r="0.7" fill="currentColor" />
+          <circle cx="15.5" cy="15" r="0.7" fill="currentColor" />
         </svg>
         <p>暂无机柜，点击上方按钮新建</p>
       </div>
 
-      <div v-else class="rack-sections" :key="'grid-' + refreshKey">
-        <div
+      <div v-else :key="'grid-' + refreshKey" class="cabinet-grid">
+        <RackCabinet
           v-for="rack in rackList"
           :key="rack.id"
-          class="rack-section"
-        >
-          <div
-            class="rack-section-header"
-            @click="openRackDetail(rack)"
-            @contextmenu.prevent="onRackContext($event, rack)"
-          >
-            <div class="rack-section-left">
-              <svg class="rack-section-icon" viewBox="0 0 16 16" width="16" height="16"><rect x="2" y="1" width="12" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><line x1="5" y1="4" x2="11" y2="4" stroke="currentColor" stroke-width="1"/><line x1="5" y1="8" x2="11" y2="8" stroke="currentColor" stroke-width="1"/><line x1="5" y1="12" x2="11" y2="12" stroke="currentColor" stroke-width="1"/></svg>
-              <span class="rack-section-name">{{ rack.name }}</span>
-              <el-tag :type="rack.type === 'cabinet' ? 'primary' : 'warning'" size="small">
-                {{ rack.type === 'cabinet' ? '机柜' : '货架' }}
-              </el-tag>
-              <span class="rack-section-stats">{{ rack.devices?.length ?? 0 }} 台设备</span>
-              <span v-if="rack.type === 'cabinet' && rack.capacity_u" class="rack-section-u">{{ usedU(rack) }}/{{ rack.capacity_u }}U</span>
-            </div>
-            <div class="rack-section-right">
-              <div v-if="rack.type === 'cabinet' && rack.capacity_u" class="capacity-bar-sm">
-                <div class="capacity-bar-fill" :style="{ width: usagePercent(rack) + '%', background: usageColor(rack) }" />
-              </div>
-              <el-button text size="small" @click.stop="openRackDetail(rack)">U位视图 →</el-button>
-            </div>
-          </div>
-          <div v-if="(rack.devices?.length ?? 0) > 0" class="rack-device-grid">
-            <div
-              v-for="device in rack.devices"
-              :key="device.id"
-              class="room-device-card"
-              :class="'type-' + device.type"
-              @click="handleDeviceClick(device)"
-              @contextmenu.prevent="onDeviceContext($event, device)"
-            >
-              <div class="room-device-icon" :class="'icon-' + device.type">
-                <component :is="getDeviceIcon(device.type)" />
-              </div>
-              <div class="room-device-info">
-                <div class="room-device-name">
-                  <span class="status-dot small" :class="statusClass(device.status)" />
-                  {{ device.name }}
-                </div>
-                <div class="room-device-meta">
-                  <span class="room-device-type" :class="'tag-' + device.type">{{ deviceTypeLabel(device.type) }}</span>
-                  <span class="room-device-ip">{{ device.ip_address || '-' }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div v-else class="rack-empty-hint">暂无设备</div>
-        </div>
+          :rack="rack"
+          :opening="openingRackId === rack.id"
+          @click="onCabinetClick"
+          @contextmenu="onRackContext"
+        />
       </div>
     </div>
 
     <!-- Rack Detail (U-slot view) -->
-    <div v-else-if="viewMode === 'rack' && selectedRack" class="rack-detail" :key="'cabinet-' + refreshKey">
+    <div
+      v-else-if="viewMode === 'rack' && selectedRack"
+      :key="'rack-' + selectedRack.id"
+      class="rack-detail dcn-anim-scale"
+    >
       <div class="view-header">
         <div class="view-header-info">
           <el-button text @click="backToRoom">
@@ -115,16 +79,25 @@
           <el-tag :type="selectedRack.type === 'cabinet' ? 'primary' : 'warning'" size="small">
             {{ selectedRack.type === 'cabinet' ? '机柜' : '货架' }}
           </el-tag>
+          <el-tag v-if="selectedRack.type === 'cabinet'" type="info" size="small">
+            {{ RACK_CAPACITY_U }}U · 每台 {{ RACK_DEVICE_SIZE_U }}U
+          </el-tag>
         </div>
-        <el-button v-if="authStore.hasPermission('device:manage')" type="primary" @click="handleCreateDevice">
-          <el-icon><Plus /></el-icon>
-          新建设备
-        </el-button>
+        <div class="view-header-actions">
+          <el-button :loading="statusScanning" @click="onScanStatuses">
+            <el-icon v-if="!statusScanning"><Refresh /></el-icon>
+            刷新状态
+          </el-button>
+          <el-button v-if="authStore.hasPermission('device:manage')" type="primary" @click="handleCreateDevice">
+            <el-icon><Plus /></el-icon>
+            新建设备
+          </el-button>
+        </div>
       </div>
 
       <!-- Shelf type: simple device list -->
-      <div v-if="selectedRack.type === 'shelf'" class="shelf-view">
-        <div v-if="devicesInRack.length === 0" class="empty-state" style="padding: 40px;">
+      <div v-if="selectedRack.type === 'shelf'" :key="'shelf-' + refreshKey" class="shelf-view">
+        <div v-if="devicesInRack.length === 0" class="empty-state" style="padding: 40px">
           <p>暂无设备，点击上方按钮新建</p>
         </div>
         <div v-else class="shelf-device-list">
@@ -144,38 +117,60 @@
       </div>
 
       <!-- Cabinet type: U-slot layout with chassis visualization -->
-      <div v-else ref="cabinetViewRef" class="cabinet-view">
-        <div
-          ref="uSlotContainerRef"
-          class="u-slot-container"
-          :style="{ '--capacity': selectedRack.capacity_u ?? 42 }"
-        >
+      <div v-else ref="cabinetViewRef" :key="'cab-' + refreshKey" class="cabinet-view">
+        <div ref="uSlotContainerRef" class="u-slot-container" :style="{ '--capacity': RACK_CAPACITY_U }">
           <!-- U number column (one cell per U) -->
           <div
-            v-for="u in (selectedRack.capacity_u ?? 42)"
+            v-for="u in RACK_CAPACITY_U"
             :key="`u-${u}`"
             class="u-slot-number"
             :style="{ gridRow: u, gridColumn: 1 }"
-          >{{ u }}</div>
+          >
+            {{ u }}
+          </div>
 
           <!-- Devices column: chassis span N rows, empty rows fill single U -->
-          <template v-for="row in renderedRows" :key="`r-${row.u}`">
+          <template v-for="row in renderedRows" :key="`r-${row.u}-${row.type}`">
             <ChassisRenderer
               v-if="row.type === 'chassis'"
               class="u-slot-chassis-cell"
               :style="{ gridRow: `${row.u} / span ${row.heightU}`, gridColumn: 2 }"
               :device="row.device"
               :height-u="row.heightU"
-              :interface-status="interfaceStatus.map.value[row.device.id]"
               :status="row.device.status"
+              :draggable="authStore.hasPermission('device:manage')"
               @click="handleDeviceClick"
               @contextmenu="onDeviceContext($event, row.device)"
+              @dragstart="handleDeviceDragStart($event, row.device)"
+              @dragover.prevent
+              @drop.stop.prevent="handleDeviceDrop($event, row.u)"
             />
+            <!-- 溢出兜底：机柜已满仍存在的设备（脏数据/并发），不占网格位，附在容器底部可点击 -->
+            <div
+              v-else-if="row.type === 'overflow'"
+              class="u-slot-overflow"
+              role="button"
+              tabindex="0"
+              :title="`机柜已满，无法为 ${row.device.name} 分配槽位`"
+              @click="handleDeviceClick(row.device)"
+              @contextmenu.prevent="onDeviceContext($event, row.device)"
+            >
+              <span class="status-dot" :class="statusClass(row.device.status)" />
+              <span class="u-slot-overflow-name">{{ row.device.name }}</span>
+              <el-tag size="small" type="danger">未分配槽位</el-tag>
+            </div>
             <div
               v-else
               class="u-slot-empty-cell"
-              :style="{ gridRow: row.u, gridColumn: 2 }"
+              :style="{ gridRow: `${row.u} / span 2`, gridColumn: 2 }"
+              role="button"
+              tabindex="0"
+              aria-label="在此机架位置新建设备"
               @click="handleCreateDeviceAt(row.u)"
+              @keydown.enter="handleCreateDeviceAt(row.u)"
+              @keydown.space.prevent="handleCreateDeviceAt(row.u)"
+              @dragover.prevent
+              @drop.prevent="handleDeviceDrop($event, row.u)"
             >
               <span class="u-slot-placeholder">+</span>
             </div>
@@ -186,57 +181,59 @@
 
     <!-- Context Menu -->
     <div v-if="contextMenu.visible" class="ctx-menu" :style="ctxMenuStyle" @click.stop>
-      <div
+      <button
         v-for="item in contextMenu.items"
         :key="item.action"
+        type="button"
         class="ctx-menu__item"
         @click="handleContextAction(item.action)"
       >
         <el-icon v-if="item.icon"><component :is="item.icon" /></el-icon>
         <span>{{ item.label }}</span>
-      </div>
+      </button>
     </div>
 
     <!-- Rack Form Dialog -->
-    <RackForm
-      v-model:visible="rackFormVisible"
-      :roomId="rackFormRoomId"
-      :rack="rackFormData"
-      @saved="onFormSaved"
-    />
+    <RackForm v-model:visible="rackFormVisible" :room-id="rackFormRoomId" :rack="rackFormData" @saved="onFormSaved" />
 
     <!-- Device Form Dialog -->
     <DeviceForm
       v-model:visible="deviceFormVisible"
-      :rackId="deviceFormRackId"
+      :rack-id="deviceFormRackId"
       :device="deviceFormData"
-      :rackType="deviceFormRackType"
-      :presetU="deviceFormPresetU"
+      :rack-type="deviceFormRackType"
+      :preset-u="deviceFormPresetU"
       @saved="onFormSaved"
     />
 
     <!-- Room Form Dialog -->
-    <RoomForm
-      v-model:visible="roomFormVisible"
-      :room="roomFormData"
-      @saved="onFormSaved"
-    />
+    <RoomForm v-model:visible="roomFormVisible" :room="roomFormData" @saved="onFormSaved" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick, h } from 'vue'
-import { Monitor, Plus, ArrowLeft, Edit, Delete } from '@element-plus/icons-vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { Monitor, Plus, ArrowLeft, Edit, Delete, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoomStore } from '@/stores/room'
 import { useDeviceStore } from '@/stores/device'
 import { useAuthStore } from '@/stores/auth'
-import { rackAPI } from '@/api'
+import { useDeviceMonitor } from '@/composables/useDeviceMonitor'
+import { deviceAPI, rackAPI } from '@/api'
+import { deviceTypeLabel, deviceTypeTagType } from '@/utils/deviceLabels'
+import {
+  RACK_CAPACITY_U,
+  RACK_DEVICE_SIZE_U,
+  RACK_SLOT_STARTS,
+  nextFreeSlot,
+  resolveRackLayout,
+  snapSlotStart,
+} from '@/utils/rackLayout'
 import RackForm from '@/components/panel/RackForm.vue'
 import DeviceForm from '@/components/panel/DeviceForm.vue'
 import RoomForm from '@/components/panel/RoomForm.vue'
 import ChassisRenderer from '@/components/scene/ChassisRenderer.vue'
-import { useInterfaceStatus } from '@/composables/useInterfaceStatus'
+import RackCabinet from '@/components/scene/RackCabinet.vue'
 import type { Room, Rack, Device } from '@/types'
 
 const emit = defineEmits<{
@@ -249,6 +246,27 @@ const emit = defineEmits<{
 const roomStore = useRoomStore()
 const deviceStore = useDeviceStore()
 const authStore = useAuthStore()
+// 与 DashboardView 共享同一单例(模块级状态),仅用 scanNow,不 start()
+const deviceMonitor = useDeviceMonitor()
+
+const statusScanning = ref(false)
+
+async function onScanStatuses() {
+  if (statusScanning.value) return
+  statusScanning.value = true
+  try {
+    const statuses = await deviceMonitor.scanNow()
+    if (statuses) {
+      const total = Object.keys(statuses).length
+      const online = Object.values(statuses).filter((s) => s === 'online').length
+      ElMessage.success(`状态已刷新：${online}/${total} 台在线`)
+    }
+  } catch {
+    ElMessage.error('设备状态扫描失败')
+  } finally {
+    statusScanning.value = false
+  }
+}
 
 const viewMode = ref<'room' | 'rack'>('room')
 const selectedRack = ref<Rack | null>(null)
@@ -287,172 +305,47 @@ const totalDeviceCount = computed(() => {
   return rackList.value.reduce((sum, r) => sum + (r.devices?.length ?? 0), 0)
 })
 
-function getDeviceIcon(type: string) {
-  const t = type.toLowerCase()
-  const icons: Record<string, () => ReturnType<typeof h>> = {
-    server: () => h('svg', { viewBox: '0 0 40 40', width: 32, height: 32 }, [
-      h('rect', { x: 6, y: 2, width: 28, height: 36, rx: 2, fill: '#e8ecf1', stroke: '#b0b8c4', 'stroke-width': 1 }),
-      h('rect', { x: 10, y: 6, width: 20, height: 6, rx: 1, fill: '#d5dbe3' }),
-      h('circle', { cx: 13, cy: 9, r: 1.5, fill: '#67c23a' }),
-      h('rect', { x: 16, y: 7.5, width: 12, height: 3, rx: 0.5, fill: '#a8b2be' }),
-      h('rect', { x: 10, y: 15, width: 20, height: 6, rx: 1, fill: '#d5dbe3' }),
-      h('circle', { cx: 13, cy: 18, r: 1.5, fill: '#409eff' }),
-      h('rect', { x: 16, y: 16.5, width: 12, height: 3, rx: 0.5, fill: '#a8b2be' }),
-      h('rect', { x: 10, y: 24, width: 20, height: 6, rx: 1, fill: '#d5dbe3' }),
-      h('circle', { cx: 13, cy: 27, r: 1.5, fill: '#409eff' }),
-      h('rect', { x: 16, y: 25.5, width: 12, height: 3, rx: 0.5, fill: '#a8b2be' }),
-    ]),
-    switch: () => h('svg', { viewBox: '0 0 40 40', width: 32, height: 32 }, [
-      h('rect', { x: 2, y: 8, width: 36, height: 24, rx: 2, fill: '#e0e8f0', stroke: '#8fa4b8', 'stroke-width': 1 }),
-      h('rect', { x: 6, y: 13, width: 3, height: 5, rx: 0.5, fill: '#409eff' }),
-      h('rect', { x: 11, y: 13, width: 3, height: 5, rx: 0.5, fill: '#409eff' }),
-      h('rect', { x: 16, y: 13, width: 3, height: 5, rx: 0.5, fill: '#67c23a' }),
-      h('rect', { x: 21, y: 13, width: 3, height: 5, rx: 0.5, fill: '#67c23a' }),
-      h('rect', { x: 26, y: 13, width: 3, height: 5, rx: 0.5, fill: '#409eff' }),
-      h('rect', { x: 31, y: 13, width: 3, height: 5, rx: 0.5, fill: '#e6a23c' }),
-      h('rect', { x: 6, y: 22, width: 3, height: 5, rx: 0.5, fill: '#409eff' }),
-      h('rect', { x: 11, y: 22, width: 3, height: 5, rx: 0.5, fill: '#409eff' }),
-      h('rect', { x: 16, y: 22, width: 3, height: 5, rx: 0.5, fill: '#67c23a' }),
-      h('rect', { x: 21, y: 22, width: 3, height: 5, rx: 0.5, fill: '#67c23a' }),
-      h('rect', { x: 26, y: 22, width: 3, height: 5, rx: 0.5, fill: '#409eff' }),
-      h('rect', { x: 31, y: 22, width: 3, height: 5, rx: 0.5, fill: '#e6a23c' }),
-    ]),
-    router: () => h('svg', { viewBox: '0 0 40 40', width: 32, height: 32 }, [
-      h('rect', { x: 4, y: 14, width: 32, height: 20, rx: 3, fill: '#e0e8f0', stroke: '#8fa4b8', 'stroke-width': 1 }),
-      h('path', { d: 'M14 14 L14 8 Q14 4 18 4 L22 4 Q26 4 26 8 L26 14', fill: 'none', stroke: '#8fa4b8', 'stroke-width': 1.5 }),
-      h('circle', { cx: 20, cy: 4, r: 2, fill: '#8fa4b8' }),
-      h('circle', { cx: 12, cy: 24, r: 2, fill: '#67c23a' }),
-      h('circle', { cx: 20, cy: 24, r: 2, fill: '#409eff' }),
-      h('circle', { cx: 28, cy: 24, r: 2, fill: '#409eff' }),
-      h('rect', { x: 8, y: 18, width: 24, height: 2, rx: 0.5, fill: '#b8c4d0' }),
-    ]),
-    firewall: () => h('svg', { viewBox: '0 0 40 40', width: 32, height: 32 }, [
-      h('path', { d: 'M20 2 L36 10 L36 22 Q36 34 20 38 Q4 34 4 22 L4 10 Z', fill: '#fef0e8', stroke: '#e6a23c', 'stroke-width': 1.5 }),
-      h('path', { d: 'M20 8 L28 12 L28 20 Q28 28 20 31 Q12 28 12 20 L12 12 Z', fill: '#fde2c8', stroke: '#e6a23c', 'stroke-width': 0.8 }),
-      h('rect', { x: 15, y: 16, width: 10, height: 3, rx: 0.5, fill: '#e6a23c' }),
-      h('rect', { x: 15, y: 21, width: 10, height: 3, rx: 0.5, fill: '#e6a23c' }),
-      h('circle', { cx: 20, cy: 13, r: 1.5, fill: '#f56c6c' }),
-    ]),
-    host: () => h('svg', { viewBox: '0 0 40 40', width: 32, height: 32 }, [
-      h('rect', { x: 6, y: 4, width: 28, height: 24, rx: 2, fill: '#e8ecf1', stroke: '#b0b8c4', 'stroke-width': 1 }),
-      h('rect', { x: 9, y: 7, width: 22, height: 15, rx: 1, fill: '#c5cdd8' }),
-      h('rect', { x: 11, y: 9, width: 18, height: 11, rx: 0.5, fill: '#dce2ea' }),
-      h('circle', { cx: 20, cy: 25, r: 1.5, fill: '#409eff' }),
-      h('rect', { x: 14, y: 28, width: 12, height: 2, rx: 0.5, fill: '#b0b8c4' }),
-      h('rect', { x: 10, y: 30, width: 20, height: 2, rx: 1, fill: '#a0a8b4' }),
-    ]),
-  }
-  return icons[t] || icons.host
-}
-
 // ---- Rendered-rows model for CSS Grid layout (multi-U spans) ----
 type RenderedRow =
   | { u: number; type: 'chassis'; device: Device; heightU: number }
+  | { u: number; type: 'overflow'; device: Device }
   | { u: number; type: 'empty' }
 
+// 布局算法单一真源:utils/rackLayout.ts（与 RackCabinet 门后预览共用）。
+// resolveRackLayout 已处理 null 顺延、冲突重排、全满越界(start=null)。
 const renderedRows = computed<RenderedRow[]>(() => {
   if (!selectedRack.value) return []
-  const capacity = selectedRack.value.capacity_u ?? 42
-  const devices = selectedRack.value.devices ?? []
+  const positioned = resolveRackLayout(selectedRack.value.devices ?? [])
 
-  // Build map: top-U -> device, with auto-assignment for null position_u
-  const deviceMap = new Map<number, Device>()
-  const occupiedSet = new Set<number>()
-
-  // First pass: register explicit positions
-  for (const d of devices) {
-    if (d.position_u != null) {
-      const sizeU = d.size_u ?? 1
-      for (let i = 0; i < sizeU; i++) occupiedSet.add(d.position_u + i)
-    }
-  }
-
-  // Second pass: auto-assign positions for null position_u (skip occupied)
-  let autoU = 1
-  for (const d of devices) {
-    let posU = d.position_u
-    if (posU == null) {
-      while (occupiedSet.has(autoU) && autoU <= capacity) autoU++
-      posU = autoU
-      const sizeU = d.size_u ?? 1
-      for (let i = 0; i < sizeU; i++) occupiedSet.add(posU! + i)
-    }
-    deviceMap.set(posU, d)
-  }
-
-  // Walk U=1..capacity, emit chassis (with span) or empty
   const rows: RenderedRow[] = []
-  let u = 1
-  while (u <= capacity) {
-    const dev = deviceMap.get(u)
-    if (dev) {
-      // Clamp size_u so the chassis doesn't exceed capacity
-      const heightU = Math.max(1, Math.min(dev.size_u ?? 1, capacity - u + 1))
-      rows.push({ u, type: 'chassis', device: dev, heightU })
-      u += heightU
-    } else {
-      rows.push({ u, type: 'empty' })
-      u += 1
+  let cursor = 0 // 指向 RACK_SLOT_STARTS 的游标,逐槽推进
+  for (const item of positioned) {
+    // 先补齐 start 之前的空槽
+    while (cursor < RACK_SLOT_STARTS.length && RACK_SLOT_STARTS[cursor] < (item.start ?? RACK_CAPACITY_U + 1)) {
+      rows.push({ u: RACK_SLOT_STARTS[cursor], type: 'empty' })
+      cursor += 1
     }
+    if (item.start == null || cursor >= RACK_SLOT_STARTS.length) {
+      // 机柜已满仍多出来的设备(后端 24U 已满时不允许新增,这里只兜底
+      // 历史脏数据/并发写入,渲染到末尾但不占格)
+      rows.push({ u: RACK_CAPACITY_U + 1, type: 'overflow', device: item.device })
+      continue
+    }
+    rows.push({ u: item.start, type: 'chassis', device: item.device, heightU: RACK_DEVICE_SIZE_U })
+    cursor += 1
+  }
+  while (cursor < RACK_SLOT_STARTS.length) {
+    rows.push({ u: RACK_SLOT_STARTS[cursor], type: 'empty' })
+    cursor += 1
   }
   return rows
 })
 
-// ---- Live interface status (port LEDs) ----
-const interfaceStatus = useInterfaceStatus()
-
-// ---- Rack helpers ----
-function usedU(rack: Rack): number {
-  const devices = rack.devices ?? []
-  return devices.reduce((sum, d) => sum + (d.size_u ?? 1), 0)
-}
-
-function usagePercent(rack: Rack): number {
-  if (!rack.capacity_u) return 0
-  return Math.min(100, Math.round((usedU(rack) / rack.capacity_u) * 100))
-}
-
-function usageColor(rack: Rack): string {
-  const pct = usagePercent(rack)
-  if (pct > 90) return 'var(--dcn-danger)'
-  if (pct > 70) return 'var(--dcn-warning)'
-  return 'var(--dcn-success)'
-}
-
 // ---- Device helpers ----
-const DEVICE_COLORS: Record<string, string> = {
-  server: 'var(--dcn-device-host)',
-  host: 'var(--dcn-device-host)',
-  switch: 'var(--dcn-device-switch)',
-  router: 'var(--dcn-device-router)',
-  firewall: 'var(--dcn-device-firewall)',
-}
-
-function deviceColor(type: string): string {
-  return DEVICE_COLORS[type.toLowerCase()] ?? 'var(--dcn-text-regular)'
-}
-
+// 后端 schema 把 status 序列化成严格二值(online/offline)，不需要再匹配
+// running/active/critical/maintenance——那些是已下线状态的死分支。
 function statusClass(status: string): string {
-  const s = status.toLowerCase()
-  if (['online', 'running', 'active'].includes(s)) return 'status-online'
-  if (['offline', 'inactive', 'critical'].includes(s)) return 'status-offline'
-  return 'status-maintenance'
-}
-
-function deviceTypeLabel(type: string): string {
-  const map: Record<string, string> = {
-    server: '服务器', switch: '交换机', router: '路由器',
-    firewall: '防火墙', host: '主机',
-  }
-  return map[type.toLowerCase()] ?? type
-}
-
-function deviceTypeTagType(type: string): string {
-  const map: Record<string, string> = {
-    server: 'info', switch: 'primary', router: 'success',
-    firewall: 'danger', host: 'info',
-  }
-  return map[type.toLowerCase()] ?? 'info'
+  return String(status).toLowerCase() === 'online' ? 'status-online' : 'status-offline'
 }
 
 // ---- Navigation ----
@@ -465,14 +358,28 @@ function emitNavState() {
   })
 }
 
+// ---- Cabinet open-door orchestration ----
+const openingRackId = ref<number | null>(null)
+
+function onCabinetClick(rack: Rack) {
+  if (openingRackId.value != null) return // 开门动画进行中，忽略重复点击
+  if (rack.type === 'shelf') {
+    // 货架无门，直接进入
+    openRackDetail(rack)
+    return
+  }
+  openingRackId.value = rack.id // 触发 RackCabinet 的 is-open → 播开门动画
+  setTimeout(() => {
+    openRackDetail(rack) // 开门动画结束后再切到 U 位视图
+    openingRackId.value = null
+  }, 560) // 略大于开门 transition(.55s)
+}
+
 function openRackDetail(rack: Rack) {
   selectedRack.value = rack
   viewMode.value = 'rack'
   emit('rack-click', { rack })
   emitNavState()
-
-  // Start live interface-status polling for this rack
-  interfaceStatus.start(rack.id)
 
   // Auto-scroll to first occupied slot
   nextTick(() => {
@@ -487,8 +394,6 @@ function openRackDetail(rack: Rack) {
 function backToRoom() {
   viewMode.value = 'room'
   selectedRack.value = null
-  // Stop interface-status polling when leaving rack view
-  interfaceStatus.stop()
   emitNavState()
 }
 
@@ -511,7 +416,7 @@ function closeContextMenu() {
   contextMenu.visible = false
 }
 
-function onRoomContext(e: MouseEvent) {
+function onRoomContext(_e: MouseEvent) {
   // No context menu for room header currently
 }
 
@@ -521,7 +426,11 @@ function onRackContext(e: MouseEvent, rack: Rack) {
     { label: '编辑机柜', action: 'edit-rack', icon: Edit, perm: 'device:manage' },
     { label: '删除机柜', action: 'delete-rack', icon: Delete, perm: 'device:manage' },
   ]
-  contextMenu.items = items.filter(i => !i.perm || authStore.hasPermission(i.perm)) as { label: string; action: string; icon: unknown }[]
+  contextMenu.items = items.filter((i) => !i.perm || authStore.hasPermission(i.perm)) as {
+    label: string
+    action: string
+    icon: unknown
+  }[]
   contextMenu.target = { type: 'rack', id: rack.id, data: rack }
   contextMenu.visible = true
 }
@@ -532,15 +441,25 @@ function onDeviceContext(e: MouseEvent, device: Device) {
     { label: '编辑设备', action: 'edit-device', icon: Edit, perm: 'device:manage' },
     { label: '删除设备', action: 'delete-device', icon: Delete, perm: 'device:manage' },
   ]
-  contextMenu.items = items.filter(i => !i.perm || authStore.hasPermission(i.perm)) as { label: string; action: string; icon: unknown }[]
+  contextMenu.items = items.filter((i) => !i.perm || authStore.hasPermission(i.perm)) as {
+    label: string
+    action: string
+    icon: unknown
+  }[]
   contextMenu.target = { type: 'device', id: device.id, data: device }
   contextMenu.visible = true
 }
 
-const ctxMenuStyle = computed(() => ({
-  left: `${contextMenu.position.x}px`,
-  top: `${contextMenu.position.y}px`,
-}))
+const ctxMenuStyle = computed(() => {
+  const MENU_W = 160
+  const MENU_H = contextMenu.items.length * 34 + 8
+  const x = Math.min(contextMenu.position.x, window.innerWidth - MENU_W - 8)
+  const y = Math.min(contextMenu.position.y, window.innerHeight - MENU_H - 8)
+  return {
+    left: `${Math.max(8, x)}px`,
+    top: `${Math.max(8, y)}px`,
+  }
+})
 
 async function handleContextAction(action: string) {
   contextMenu.visible = false
@@ -548,7 +467,7 @@ async function handleContextAction(action: string) {
   if (!target) return
 
   if (action === 'edit-rack' && target.id) {
-    const freshRack = rackList.value.find(r => r.id === target.id)
+    const freshRack = rackList.value.find((r) => r.id === target.id)
     const rack = freshRack || target.data
     rackFormRoomId.value = rack.room_id
     rackFormData.value = rack
@@ -568,7 +487,7 @@ async function handleContextAction(action: string) {
     }
   } else if (action === 'edit-device' && target.id) {
     // Look up fresh device data from current rack
-    const freshDevice = devicesInRack.value.find(d => d.id === target.id)
+    const freshDevice = devicesInRack.value.find((d) => d.id === target.id)
     const device = freshDevice || target.data
     deviceFormRackId.value = device.rack_id
     deviceFormData.value = device
@@ -601,7 +520,7 @@ const rackFormData = ref<Rack | null>(null)
 const deviceFormVisible = ref(false)
 const deviceFormRackId = ref(0)
 const deviceFormData = ref<Device | null>(null)
-const deviceFormRackType = ref('cabinet')
+const deviceFormRackType = ref<Rack['type']>('cabinet')
 const deviceFormPresetU = ref<number | null>(null)
 
 function handleCreateRack() {
@@ -623,7 +542,7 @@ async function handleDeleteRoom() {
     await ElMessageBox.confirm(
       `确定要删除机房「${currentRoom.value.name}」吗？该操作将同时删除其下所有机柜和设备。`,
       '删除确认',
-      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
     )
   } catch {
     return
@@ -640,10 +559,15 @@ async function handleDeleteRoom() {
 
 function handleCreateDevice() {
   if (!selectedRack.value) return
+  const nextPosition = selectedRack.value.type === 'cabinet' ? findNextDevicePosition() : null
+  if (selectedRack.value.type === 'cabinet' && nextPosition == null) {
+    ElMessage.warning('当前 24U 机柜已满')
+    return
+  }
   deviceFormRackId.value = selectedRack.value.id
   deviceFormData.value = null
   deviceFormRackType.value = selectedRack.value.type
-  deviceFormPresetU.value = null
+  deviceFormPresetU.value = nextPosition
   deviceFormVisible.value = true
 }
 
@@ -652,8 +576,47 @@ function handleCreateDeviceAt(u: number) {
   deviceFormRackId.value = selectedRack.value.id
   deviceFormData.value = null
   deviceFormRackType.value = selectedRack.value.type
-  deviceFormPresetU.value = u
+  deviceFormPresetU.value = snapSlotStart(u)
   deviceFormVisible.value = true
+}
+
+function findNextDevicePosition(): number | null {
+  return nextFreeSlot(devicesInRack.value)
+}
+
+function handleDeviceDragStart(event: DragEvent, device: Device) {
+  if (!authStore.hasPermission('device:manage')) {
+    event.preventDefault()
+    return
+  }
+  event.dataTransfer?.setData('text/plain', String(device.id))
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+}
+
+async function handleDeviceDrop(event: DragEvent, targetU: number) {
+  const deviceId = Number(event.dataTransfer?.getData('text/plain'))
+  if (!deviceId) return
+  const target = snapSlotStart(targetU)
+  const dragged = devicesInRack.value.find((device) => device.id === deviceId)
+  if (!dragged) return
+  const source =
+    renderedRows.value.filter((row) => row.type === 'chassis').find((row) => row.device.id === deviceId)?.u ??
+    snapSlotStart(dragged.position_u ?? 1)
+  if (source === target) return
+  const targetDevice = renderedRows.value
+    .filter((row) => row.type === 'chassis')
+    .find((row) => row.u === target)?.device
+  const positions = [{ device_id: dragged.id, position_u: target }]
+  if (targetDevice && targetDevice.id !== dragged.id) {
+    positions.push({ device_id: targetDevice.id, position_u: source })
+  }
+  try {
+    if (!selectedRack.value) return
+    await deviceAPI.reorder(selectedRack.value.id, positions)
+    await onFormSaved()
+  } catch {
+    ElMessage.error('设备位置更新失败')
+  }
 }
 
 async function onFormSaved() {
@@ -661,14 +624,14 @@ async function onFormSaved() {
   // Always sync currentRoom to fresh data
   const targetId = currentRoom.value?.id
   if (targetId) {
-    const freshRoom = roomStore.rooms.find(r => r.id === targetId)
+    const freshRoom = roomStore.rooms.find((r) => r.id === targetId)
     if (freshRoom) roomStore.setCurrentRoom(freshRoom)
   }
   // Refresh selected rack if in rack detail view
   if (viewMode.value === 'rack' && selectedRack.value) {
-    const room = roomStore.rooms.find(r => r.id === selectedRack.value!.room_id)
+    const room = roomStore.rooms.find((r) => r.id === selectedRack.value!.room_id)
     if (room) {
-      const rack = room.racks?.find(r => r.id === selectedRack.value!.id)
+      const rack = room.racks?.find((r) => r.id === selectedRack.value!.id)
       if (rack) selectedRack.value = rack
     }
   }
@@ -681,18 +644,23 @@ async function onFormSaved() {
   emit('data-changed')
 }
 
-// ---- Click outside to close context menu ----
+// ---- Click outside / Escape to close context menu ----
 function onDocumentClick() {
   closeContextMenu()
 }
 
+function onDocumentKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeContextMenu()
+}
+
 onMounted(() => {
   document.addEventListener('click', onDocumentClick)
+  document.addEventListener('keydown', onDocumentKeydown)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', onDocumentClick)
-  interfaceStatus.stop()
+  document.removeEventListener('keydown', onDocumentKeydown)
 })
 
 function openRackById(rackId: number) {
@@ -759,183 +727,15 @@ defineExpose({ openRackById })
   color: var(--dcn-text-secondary);
 }
 
-/* ---- Rack grid ---- */
-.rack-sections {
+/* ---- Cabinet grid (机柜阵列) ---- */
+.cabinet-grid {
   flex: 1;
   overflow-y: auto;
-  padding: var(--dcn-space-4) var(--dcn-space-6);
-  display: flex;
-  flex-direction: column;
-  gap: var(--dcn-space-4);
-}
-
-.rack-section {
-  background: var(--dcn-bg-card);
-  border-radius: var(--dcn-radius-lg);
-  border: 1px solid var(--dcn-border-strong);
-  overflow: hidden;
-}
-
-.rack-section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--dcn-space-3) var(--dcn-space-4);
-  background: var(--dcn-bg-muted);
-  border-bottom: 1px solid var(--dcn-border);
-  cursor: pointer;
-  transition: background var(--dcn-transition-fast);
-}
-
-.rack-section-header:hover {
-  background: var(--dcn-primary-bg);
-}
-
-.rack-section-left {
-  display: flex;
-  align-items: center;
-  gap: var(--dcn-space-2);
-}
-
-.rack-section-icon {
-  color: var(--dcn-text-secondary);
-}
-
-.rack-section-name {
-  font-size: var(--dcn-text-md);
-  font-weight: 600;
-  color: var(--dcn-text-primary);
-}
-
-.rack-section-stats {
-  font-size: var(--dcn-text-sm);
-  color: var(--dcn-text-secondary);
-}
-
-.rack-section-u {
-  font-size: var(--dcn-text-sm);
-  color: var(--dcn-text-secondary);
-}
-
-.rack-section-right {
-  display: flex;
-  align-items: center;
-  gap: var(--dcn-space-3);
-}
-
-.capacity-bar-sm {
-  width: 80px;
-  height: 5px;
-  background: var(--dcn-border);
-  border-radius: var(--dcn-radius-xs);
-  overflow: hidden;
-}
-
-.rack-device-grid {
+  padding: var(--dcn-space-5) var(--dcn-space-6);
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: var(--dcn-space-2);
-  padding: var(--dcn-space-3) var(--dcn-space-4);
-}
-
-.room-device-card {
-  display: flex;
-  align-items: center;
-  gap: var(--dcn-space-2);
-  padding: var(--dcn-space-2) 10px;
-  border: 1px solid var(--dcn-border);
-  border-radius: var(--dcn-radius-md);
-  cursor: pointer;
-  transition: all var(--dcn-transition-fast);
-  background: var(--dcn-bg-elevated);
-}
-
-.room-device-card:hover {
-  border-color: var(--dcn-border-strong);
-  box-shadow: var(--dcn-shadow-sm);
-  background: var(--dcn-bg-card);
-}
-
-.room-device-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--dcn-radius-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  overflow: hidden;
-}
-
-.room-device-icon.icon-server { background: var(--dcn-device-server-bg); }
-.room-device-icon.icon-switch { background: var(--dcn-device-switch-bg); }
-.room-device-icon.icon-router { background: var(--dcn-device-router-bg); }
-.room-device-icon.icon-firewall { background: var(--dcn-device-firewall-bg); }
-.room-device-icon.icon-host { background: var(--dcn-device-host-bg); }
-
-.room-device-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.room-device-name {
-  font-size: var(--dcn-text-base);
-  font-weight: 500;
-  color: var(--dcn-text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: flex;
-  align-items: center;
-  gap: var(--dcn-space-1);
-}
-
-.room-device-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--dcn-space-1);
-  margin-top: var(--dcn-radius-xs);
-}
-
-.room-device-type {
-  font-size: var(--dcn-text-xs);
-  padding: 0 var(--dcn-space-1);
-  border-radius: var(--dcn-radius-xs);
-  line-height: 18px;
-  white-space: nowrap;
-}
-
-.room-device-type.tag-server { background: var(--dcn-device-host-bg); color: var(--dcn-text-regular); }
-.room-device-type.tag-switch { background: var(--dcn-device-switch-bg); color: var(--dcn-device-switch); }
-.room-device-type.tag-router { background: var(--dcn-device-router-bg); color: var(--dcn-device-router); }
-.room-device-type.tag-firewall { background: var(--dcn-device-firewall-bg); color: var(--dcn-device-firewall); }
-.room-device-type.tag-host { background: var(--dcn-device-host-bg); color: var(--dcn-text-regular); }
-
-.room-device-ip {
-  font-size: var(--dcn-text-xs);
-  color: var(--dcn-text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.rack-empty-hint {
-  padding: var(--dcn-space-3) var(--dcn-space-4);
-  font-size: var(--dcn-text-base);
-  color: var(--dcn-text-placeholder);
-}
-
-.capacity-bar {
-  height: 6px;
-  background: var(--dcn-border);
-  border-radius: var(--dcn-radius-xs);
-  overflow: hidden;
-}
-
-.capacity-bar-fill {
-  height: 100%;
-  border-radius: var(--dcn-radius-xs);
-  transition: width 0.3s;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--dcn-space-5);
+  align-content: start;
 }
 
 /* ---- Rack detail ---- */
@@ -957,7 +757,7 @@ defineExpose({ openRackById })
   width: 540px;
   display: grid;
   grid-template-columns: 36px 1fr;
-  grid-template-rows: repeat(var(--capacity, 42), 24px);
+  grid-template-rows: repeat(var(--capacity, 24), 24px);
   border: 2px solid var(--dcn-border-strong);
   border-radius: var(--dcn-radius-md);
   overflow: hidden;
@@ -989,9 +789,19 @@ defineExpose({ openRackById })
   cursor: pointer;
   border-bottom: 1px solid var(--dcn-border);
   background: var(--dcn-bg-muted);
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
 }
 .u-slot-empty-cell:hover {
   background: var(--dcn-primary-bg-deep);
+}
+.u-slot-empty-cell:focus-visible {
+  outline: 2px solid var(--dcn-primary);
+  outline-offset: -2px;
 }
 
 /* Chassis cell — span multiple grid rows; NO border-bottom */
@@ -1004,6 +814,29 @@ defineExpose({ openRackById })
 .u-slot-placeholder {
   font-size: var(--dcn-text-sm);
   color: var(--dcn-text-placeholder);
+}
+
+/* 溢出设备（机柜已满）：附在网格末尾的告警行，不占 U 位 */
+.u-slot-overflow {
+  display: flex;
+  align-items: center;
+  gap: var(--dcn-space-2);
+  padding: var(--dcn-space-2) var(--dcn-space-3);
+  margin-top: var(--dcn-space-2);
+  background: var(--dcn-bg-card);
+  border: 1px dashed var(--dcn-danger);
+  border-radius: var(--dcn-radius-md);
+  cursor: pointer;
+}
+.u-slot-overflow-name {
+  font-size: var(--dcn-text-sm);
+  font-weight: 500;
+  color: var(--dcn-text-primary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- Shelf view ---- */
@@ -1060,9 +893,13 @@ defineExpose({ openRackById })
   height: 6px;
 }
 
-.status-online { background: var(--dcn-dot-online); box-shadow: 0 0 4px rgba(103, 194, 58, 0.5); }
-.status-offline { background: var(--dcn-dot-offline); }
-.status-maintenance { background: var(--dcn-dot-maintenance); }
+.status-online {
+  background: var(--dcn-dot-online);
+  box-shadow: 0 0 4px rgba(103, 194, 58, 0.5);
+}
+.status-offline {
+  background: var(--dcn-dot-offline);
+}
 
 /* ---- Context menu ---- */
 .ctx-menu {
@@ -1085,6 +922,12 @@ defineExpose({ openRackById })
   color: var(--dcn-text-primary);
   cursor: pointer;
   transition: background-color var(--dcn-transition-fast);
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
 }
 
 .ctx-menu__item:hover {

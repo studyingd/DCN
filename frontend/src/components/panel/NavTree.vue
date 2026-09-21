@@ -2,131 +2,150 @@
   <div class="nav-tree" :class="{ collapsed }">
     <div class="nav-tree-header">
       <span v-if="!collapsed" class="nav-tree-title">导航</span>
-      <el-tooltip v-else content="展开导航" placement="right" :show-after="300">
-        <el-icon class="collapse-icon-static" @click="$emit('toggle-collapse')"><Expand /></el-icon>
-      </el-tooltip>
+      <button v-else class="collapse-icon-static" type="button" aria-label="展开导航" @click="$emit('toggle-collapse')">
+        <el-icon><Expand /></el-icon>
+      </button>
     </div>
-
     <div class="nav-menu">
-      <el-tooltip v-for="item in menuItems" :key="item.key" :content="item.label" placement="right" :disabled="!collapsed" :show-after="300">
-        <div
-          v-if="item.visible"
-          class="nav-menu-item"
-          :class="{ active: activePanel === item.key }"
-          @click="$emit('nav-panel', item.key)"
-        >
-          <el-icon><component :is="item.icon" /></el-icon>
-          <span v-if="!collapsed" class="nav-menu-label">{{ item.label }}</span>
-        </div>
-      </el-tooltip>
+      <button
+        v-for="item in menuItems"
+        :key="item.key"
+        type="button"
+        class="nav-menu-item"
+        :class="{ active: activePanel === item.key }"
+        :aria-current="activePanel === item.key ? 'page' : undefined"
+        :title="collapsed ? item.label : undefined"
+        @click="$emit('nav-panel', item.key)"
+      >
+        <el-icon><component :is="item.icon" /></el-icon
+        ><span class="nav-menu-label" :class="{ hidden: collapsed }">{{ item.label }}</span>
+      </button>
     </div>
-
     <div class="nav-tree-footer">
-      <div class="collapse-btn" @click="$emit('toggle-collapse')">
-        <el-icon :size="16">
-          <component :is="collapsed ? 'Expand' : 'Fold'" />
-        </el-icon>
-        <span v-if="!collapsed" class="collapse-text">收起导航</span>
-      </div>
+      <button
+        class="collapse-btn"
+        type="button"
+        :aria-label="collapsed ? '展开导航' : '收起导航'"
+        :title="collapsed ? '展开导航' : undefined"
+        @click="$emit('toggle-collapse')"
+      >
+        <el-icon><component :is="collapsed ? Expand : Fold" /></el-icon
+        ><span class="collapse-text" :class="{ hidden: collapsed }">收起导航</span>
+      </button>
     </div>
   </div>
 </template>
-
 <script setup lang="ts">
-import { computed } from 'vue'
-import { HomeFilled, OfficeBuilding, Key, Document, User, Promotion, DataAnalysis, Expand, Fold } from '@element-plus/icons-vue'
+import { computed, type Component } from 'vue'
+import {
+  HomeFilled,
+  OfficeBuilding,
+  MagicStick,
+  Odometer,
+  Setting,
+  Box,
+  Briefcase,
+  Platform,
+  Expand,
+  Fold,
+  Bell,
+} from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
-
-defineProps<{
-  activePanel: string
-  collapsed: boolean
-}>()
-
-defineEmits<{
-  'nav-panel': [panel: string]
-  'toggle-collapse': []
-}>()
-
+defineProps<{ activePanel: string; collapsed: boolean }>()
+defineEmits<{ 'nav-panel': [panel: string]; 'toggle-collapse': [] }>()
 const authStore = useAuthStore()
-
-const menuItems = computed(() => [
-  { key: 'home', label: '系统首页', icon: HomeFilled, visible: true },
-  { key: 'rooms', label: '机房管理', icon: OfficeBuilding, visible: true },
-  { key: 'scripts', label: '脚本管理', icon: Promotion, visible: authStore.hasPermission('script:manage') },
-  { key: 'inspection', label: '巡检管理', icon: DataAnalysis, visible: authStore.hasPermission('inspection:manage') },
-  { key: 'credentials', label: '凭据管理', icon: Key, visible: authStore.hasPermission('credential:manage') },
-  { key: 'audit', label: '审计中心', icon: Document, visible: authStore.hasPermission('audit:manage') },
-  { key: 'users', label: '用户管理', icon: User, visible: authStore.hasPermission('user:manage') },
-])
+const menuItems = computed<{ key: string; label: string; icon: Component; visible: boolean }[]>(() =>
+  [
+    { key: 'home', label: '系统首页', icon: HomeFilled, visible: true },
+    { key: 'rooms', label: '机房管理', icon: OfficeBuilding, visible: true },
+    { key: 'metrics', label: '服务器监控', icon: Odometer, visible: authStore.hasPermission('device:view') },
+    { key: 'pve', label: '虚拟化管理', icon: Platform, visible: authStore.hasPermission('device:view') },
+    { key: 'containers', label: '容器管理', icon: Box, visible: authStore.hasPermission('device:view') },
+    { key: 'business', label: '业务监控', icon: Briefcase, visible: authStore.hasPermission('device:view') },
+    { key: 'alerts', label: '告警中心', icon: Bell, visible: authStore.hasPermission('automation:manage') },
+    {
+      key: 'automation',
+      label: '自动化运维',
+      icon: MagicStick,
+      visible:
+        authStore.hasPermission('automation:manage') ||
+        authStore.hasPermission('automation:manage') ||
+        authStore.hasPermission('device:remote'),
+    },
+    {
+      key: 'system',
+      label: '系统设置',
+      icon: Setting,
+      visible: authStore.hasPermission('user:manage') || authStore.hasPermission('settings:manage'),
+    },
+  ].filter((x) => x.visible),
+)
 </script>
-
 <style scoped>
 .nav-tree {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 0;
-  background: var(--dcn-bg-card);
-  transition: width var(--dcn-transition-normal);
+  padding: 8px;
+  background: var(--dcn-bg-section);
   overflow: hidden;
 }
-
 .nav-tree-header {
-  padding: var(--dcn-space-3) var(--dcn-space-3) var(--dcn-space-2);
+  padding: 8px 10px 14px;
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 36px;
 }
-
 .nav-tree-title {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
-  color: var(--dcn-text-placeholder);
+  color: var(--dcn-text-secondary);
   text-transform: uppercase;
   letter-spacing: 1.5px;
   width: 100%;
 }
-
 .collapse-icon-static {
-  font-size: 16px;
-  color: var(--dcn-text-placeholder);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  /* 收起态唯一的「展开」入口,用主色而非占位符灰,避免在深色侧栏里隐形 */
+  color: var(--dcn-primary-light);
   cursor: pointer;
-  transition: color var(--dcn-transition-fast);
+  border-radius: var(--dcn-radius-md);
+  transition: all var(--dcn-transition-fast);
 }
 .collapse-icon-static:hover {
-  color: var(--dcn-text-primary);
+  background: var(--dcn-sidebar-hover-bg);
 }
-
 .nav-menu {
-  padding: var(--dcn-space-1) var(--dcn-space-2);
+  padding: 0;
   flex: 1;
+  overflow-y: auto;
 }
-
-.collapsed .nav-menu {
-  padding: var(--dcn-space-1) var(--dcn-space-1);
-}
-
 .nav-menu-item {
   display: flex;
   align-items: center;
   gap: var(--dcn-space-2);
-  padding: 7px var(--dcn-space-3);
+  min-height: 40px;
+  padding: 8px 10px;
   border-radius: var(--dcn-radius-md);
-  font-size: var(--dcn-text-sm);
+  font-size: var(--dcn-text-md);
   color: var(--dcn-text-regular);
   cursor: pointer;
   transition: all var(--dcn-transition-fast);
-  margin-bottom: 1px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  margin-bottom: 3px;
   white-space: nowrap;
   overflow: hidden;
 }
-
-.collapsed .nav-menu-item {
-  justify-content: center;
-  padding: 7px 0;
-}
-
 .nav-menu-item:hover {
   background: var(--dcn-sidebar-hover-bg);
   color: var(--dcn-text-primary);
@@ -141,44 +160,56 @@ const menuItems = computed(() => [
   flex-shrink: 0;
   color: var(--dcn-text-placeholder);
 }
+/* 文字标签常驻 DOM,用 opacity + max-width 与侧栏宽度动画(150ms)同步,
+   收起时先淡出再收宽度,展开时宽度到位后淡入——避免 v-if 瞬移的突兀感。 */
+.nav-menu-label,
+.collapse-text {
+  display: inline-block;
+  max-width: 160px;
+  opacity: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  /* 与侧栏宽度动画(--dcn-transition-normal, 220ms)同节奏 */
+  transition:
+    opacity var(--dcn-transition-normal),
+    max-width var(--dcn-transition-normal);
+}
+.nav-menu-label.hidden,
+.collapse-text.hidden {
+  max-width: 0;
+  opacity: 0;
+}
 .nav-menu-item.active .el-icon {
-  color: var(--dcn-text-secondary);
+  color: var(--dcn-primary-light);
 }
-
-.nav-menu-label {
-  transition: opacity var(--dcn-transition-fast);
+.collapsed .nav-menu-item {
+  justify-content: center;
+  padding: 7px 0;
 }
-
 .nav-tree-footer {
-  padding: var(--dcn-space-2);
+  padding: 8px 0 0;
   border-top: 1px solid var(--dcn-border);
 }
-
 .collapse-btn {
   display: flex;
   align-items: center;
   gap: var(--dcn-space-2);
-  padding: 6px var(--dcn-space-3);
+  min-height: 36px;
+  padding: 6px 10px;
   border-radius: var(--dcn-radius-md);
   font-size: var(--dcn-text-xs);
   color: var(--dcn-text-placeholder);
   cursor: pointer;
-  transition: all var(--dcn-transition-fast);
-  white-space: nowrap;
-  overflow: hidden;
+  width: 100%;
+  border: 0;
+  background: transparent;
 }
-
 .collapsed .collapse-btn {
   justify-content: center;
   padding: 6px 0;
 }
-
 .collapse-btn:hover {
   background: var(--dcn-sidebar-hover-bg);
   color: var(--dcn-text-primary);
-}
-
-.collapse-text {
-  font-size: var(--dcn-text-xs);
 }
 </style>

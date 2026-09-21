@@ -10,6 +10,7 @@ import uuid
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.logging_config import reset_trace_id, set_trace_id
 from app.utils import sanitize_for_log
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,9 @@ class TraceMiddleware:
                     trace_id_injected = True
             await send(message)
 
+        # 绑定到 contextvar，服务层/路由层的 logger 调用也会带上同一个 traceId。
+        # 同步路由跑在线程池里，anyio 会复制上下文，因此同样能取到。
+        trace_token = set_trace_id(trace_id)
         try:
             await self.app(scope, receive, send_with_trace)
         finally:
@@ -92,3 +96,4 @@ class TraceMiddleware:
                 status_code,
                 duration_ms,
             )
+            reset_trace_id(trace_token)

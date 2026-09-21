@@ -1,7 +1,7 @@
 """Shared SSH helpers: host-key verification (TOFU) and bounded command reads.
 
 Centralizes the paramiko connection setup previously copy-pasted across
-``terminal`` / ``inspection`` / ``power`` / ``os_detect`` / ``interface_status``.
+``terminal`` / ``inspection`` / ``power`` / ``os_detect``.
 
 Every connection now either:
   * enforces a previously pinned host key (any mismatch → ``HostKeyMismatchError``,
@@ -15,6 +15,7 @@ cannot exhaust API-host memory.
 
 from __future__ import annotations
 
+import io
 import logging
 from typing import TYPE_CHECKING
 
@@ -37,22 +38,30 @@ def open_ssh_client(
     host: str,
     port: int,
     username: str,
-    password: str,
+    password: str | None = None,
     *,
     timeout: int = 10,
     banner_timeout: int = 30,
     pinned_key_b64: str | None = None,
+    private_key: str | None = None,
+    allow_tofu: bool = False,
 ) -> tuple[paramiko.SSHClient, str]:
     """Open an SSH connection and return ``(client, remote_host_key_b64)``.
 
-    Auth is password-only (``look_for_keys=False, allow_agent=False``).
+    Authentication uses the supplied password and/or private key only;
+    ambient SSH agent/key discovery is disabled.
     """
     client = paramiko.SSHClient()
-    # AutoAdd lets connect succeed; we perform an explicit equality check below so
-    # a pinned key is still strictly enforced (mismatch → HostKeyMismatchError).
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # A pinned key is always checked by the client policy.  Unknown keys are
+    # accepted only for an explicitly controlled first-contact (connect_device
+    # with a DB session); direct callers must opt in to TOFU.
+    client.set_missing_host_key_policy(
+        paramiko.AutoAddPolicy()
+        if (allow_tofu or pinned_key_b64)
+        else paramiko.RejectPolicy()
+    )
 
-    client.connect(
+    connect_kwargs = dict(
         hostname=host,
         port=port,
         username=username,
@@ -62,6 +71,29 @@ def open_ssh_client(
         look_for_keys=False,
         allow_agent=False,
     )
+    if private_key:
+        key_obj = None
+        key_classes = tuple(
+            key_cls
+            for key_cls in (
+                getattr(paramiko, "RSAKey", None),
+                getattr(paramiko, "Ed25519Key", None),
+                getattr(paramiko, "ECDSAKey", None),
+                getattr(paramiko, "DSSKey", None),
+            )
+            if key_cls is not None
+        )
+        for key_cls in key_classes:
+            try:
+                key_obj = key_cls.from_private_key(io.StringIO(private_key))
+                break
+            except (paramiko.SSHException, ValueError, TypeError):
+                continue
+        if key_obj is None:
+            raise paramiko.SSHException("无法解析 SSH 私钥")
+        connect_kwargs["pkey"] = key_obj
+        connect_kwargs["password"] = password or None
+    client.connect(**connect_kwargs)
 
     transport = client.get_transport()
     if transport is None:
@@ -84,11 +116,12 @@ def open_ssh_client(
 def connect_device(
     device,
     username: str,
-    password: str,
+    password: str | None,
     *,
     db: "Session | None" = None,
     timeout: int = 10,
     banner_timeout: int = 30,
+    private_key: str | None = None,
 ) -> tuple[paramiko.SSHClient, str]:
     """Connect to a Device, enforcing/persisting its pinned SSH host key (TOFU).
 
@@ -99,7 +132,12 @@ def connect_device(
     TOFU write actually commits (the passed ``device`` may belong to another
     session and would otherwise be a silent no-op).
     """
-    if db is not None:
+    # 仅当 device 是有持久 id 的 ORM Device 时才回库重写 host key(TOFU);
+    # PVE 虚拟机运行时目标(AgentTarget, id=None, 非 ORM)跳过回写,仅做连接。
+    is_persistent = getattr(device, "id", None) is not None and hasattr(
+        device, "__table__"
+    )
+    if db is not None and is_persistent:
         dev = db.get(type(device), device.id) or device
     else:
         dev = device
@@ -112,11 +150,17 @@ def connect_device(
         timeout=timeout,
         banner_timeout=banner_timeout,
         pinned_key_b64=pinned,
+        private_key=private_key,
+        allow_tofu=(not bool(pinned) and db is not None),
     )
-    if not pinned and db is not None and dev.ssh_host_key != key:
+    if not pinned and db is not None and is_persistent and dev.ssh_host_key != key:
         dev.ssh_host_key = key
         db.commit()
-        logger.info("Recorded SSH host key for device %s (id=%s)", dev.name, dev.id)
+        logger.info(
+            "Recorded SSH host key for device %s (id=%s)",
+            getattr(dev, "name", None) or getattr(dev, "ip_address", "unknown"),
+            dev.id,
+        )
     return client, key
 
 
@@ -156,15 +200,21 @@ def exec_ssh_command(
 def exec_on_device(
     device,
     username: str,
-    password: str,
+    password: str | None,
     command: str,
     *,
     timeout: int = 15,
     db: "Session | None" = None,
+    private_key: str | None = None,
 ) -> tuple[int, str, str]:
     """Open → exec → close a single command on a Device (with TOFU key pinning)."""
     client, _key = connect_device(
-        device, username, password, db=db, timeout=min(timeout, 15)
+        device,
+        username,
+        password,
+        db=db,
+        timeout=min(timeout, 15),
+        private_key=private_key,
     )
     try:
         return exec_ssh_command(client, command, timeout=timeout)

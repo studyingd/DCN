@@ -1,9 +1,77 @@
 import axios from 'axios'
 import router from '@/router'
-import type { LoginRequest, LoginResponse, User, Room, Rack, Device, Connection, Credential, Role, UserGroup, ScheduledTask } from '@/types'
-import type { DashboardOverview, DeviceTypeItem, RoomSummaryItem, TopologyNode, TopologyEdge, AuditEventItem, LoginTrendItem } from '@/types/dashboard'
-import type { InspectionDeviceItem, InspectionItemInfo, InspectionRunRequest, InspectionRunResult, InspectionRecord, InspectionRecordDetail, InspectionReport } from '@/types/inspection'
-import type { InterfaceStatusResponse } from '@/composables/useInterfaceStatus'
+import type {
+  LoginRequest,
+  LoginResponse,
+  User,
+  Room,
+  Rack,
+  Device,
+  Role,
+  DeviceSavePayload,
+  Webhook,
+  WebhookCreate,
+  WebhookUpdate,
+  AlertRule,
+  AlertEvent,
+  AlertEventsPage,
+  MaintenanceWindow,
+  AlertOverview,
+  FeishuDirectoryRequest,
+  FeishuDepartmentPage,
+  FeishuUserPage,
+} from '@/types'
+import type { DeviceContainersEntry } from '@/types/containers'
+import type { BusinessDetail, BusinessHealthItem, InterfaceForm, PveGuestCandidate } from '@/types/business'
+import type {
+  PveConnection,
+  PveGuest,
+  PveGuestCloneResult,
+  PveGuestConfigUpdate,
+  PveGuestConfigUpdateResult,
+  PveGuestCreate,
+  PveGuestCreateResult,
+  PveGuestDeleteResult,
+  PveGuestVolumePreview,
+  PveNode,
+  PveNodeStorage,
+  PveRrdPoint,
+  PveSnapshot,
+  PveTaskStatus,
+} from '@/types/pve'
+import type { DashboardOverview, DeviceTypeItem, RoomSummaryItem } from '@/types/dashboard'
+import type {
+  InspectionDeviceItem,
+  InspectionItemInfo,
+  InspectionRunRequest,
+  InspectionRunResult,
+  InspectionRecord,
+  InspectionRecordDetail,
+  InspectionReport,
+  MetricThresholdsResponse,
+} from '@/types/inspection'
+import type {
+  MetricsDeviceList,
+  MetricsDeviceDetail,
+  MetricsHistory,
+  MetricsRange,
+  MetricsTrend,
+} from '@/types/metrics'
+import type {
+  AgentDevice,
+  AgentStatus,
+  AgentDiagnoseStart,
+  AgentRunSummary,
+  AgentRunDetail,
+  AgentConfig,
+} from '@/types/agent'
+import type {
+  AutomationDevice,
+  AutomationJob,
+  AutomationJobListItem,
+  AutomationJobType,
+  AutomationSchedule,
+} from '@/types/automation'
 
 const api = axios.create({
   baseURL: '/api',
@@ -14,6 +82,7 @@ const api = axios.create({
   },
 })
 
+/** 首次启动数据库引导(安装模式)。正常模式下 status 恒为 setup_required=false。 */
 // ── Auth model ────────────────────────────────────────────────────
 // Access/refresh tokens live ONLY in httpOnly cookies set by the backend, so
 // the SPA never reads, stores, or attaches them — an XSS cannot exfiltrate a
@@ -54,7 +123,7 @@ api.interceptors.response.use(
       return Promise.reject(error)
     }
     return Promise.reject(error)
-  }
+  },
 )
 
 // ---------- Auth ----------
@@ -67,6 +136,8 @@ export interface AuthProfile {
   permissions: string[]
   device_scope: string
   device_ids: number[]
+  /** 已授权虚拟机的 "conn:gtype:vmid" 编码，device_scope='all' 时为空数组。 */
+  pve_guests: string[]
   must_change_password: boolean
 }
 
@@ -107,8 +178,59 @@ export const terminalAPI = {
     password?: string
     width?: number
     height?: number
+    container?: string
   }): Promise<{ data: { ticket: string } }> {
     return api.post('/terminal/ticket', data)
+  },
+}
+
+// ---------- Files (SFTP transfer over SSH) ----------
+export interface FileEntry {
+  name: string
+  size: number
+  type: 'dir' | 'file'
+  mtime: number | null
+}
+export const fileAPI = {
+  list(
+    deviceId: number,
+    params: {
+      path?: string
+      credential_id?: number | null
+      username?: string
+      password?: string
+    },
+  ): Promise<{ data: { path: string; entries: FileEntry[] } }> {
+    return api.post(`/devices/${deviceId}/files/list`, params)
+  },
+
+  upload(
+    deviceId: number,
+    form: FormData,
+    onProgress?: (pct: number) => void,
+  ): Promise<{ data: { filename: string; path: string; size: number } }> {
+    return api.post(`/devices/${deviceId}/files/upload`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+      onUploadProgress: (e: { loaded: number; total?: number }) => {
+        if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
+      },
+    })
+  },
+
+  download(
+    deviceId: number,
+    params: {
+      path: string
+      credential_id?: number | null
+      username?: string
+      password?: string
+    },
+  ): Promise<{ data: Blob }> {
+    return api.post(`/devices/${deviceId}/files/download`, params, {
+      responseType: 'blob',
+      timeout: 300000,
+    })
   },
 }
 
@@ -116,6 +238,10 @@ export const terminalAPI = {
 export const roomAPI = {
   list(): Promise<{ data: Room[] }> {
     return api.get('/rooms')
+  },
+
+  tree(): Promise<{ data: Room[] }> {
+    return api.get('/rooms/tree')
   },
 
   create(data: Partial<Room>): Promise<{ data: Room }> {
@@ -164,7 +290,7 @@ export const deviceAPI = {
     return api.get(`/rooms/${roomId}/devices`)
   },
 
-  create(rackId: number, data: Partial<Device>): Promise<{ data: Device }> {
+  create(rackId: number, data: DeviceSavePayload): Promise<{ data: Device }> {
     return api.post(`/racks/${rackId}/devices`, data)
   },
 
@@ -172,41 +298,389 @@ export const deviceAPI = {
     return api.get(`/devices/${id}`)
   },
 
-  update(id: number, data: Partial<Device>): Promise<{ data: Device }> {
+  update(id: number, data: DeviceSavePayload): Promise<{ data: Device }> {
     return api.put(`/devices/${id}`, data)
+  },
+
+  reorder(rackId: number, positions: { device_id: number; position_u: number }[]): Promise<void> {
+    return api.put(`/racks/${rackId}/devices/reorder`, { positions })
   },
 
   delete(id: number): Promise<void> {
     return api.delete(`/devices/${id}`)
   },
 
-  detectOS(ipAddress: string, credentialId?: number): Promise<{ data: {
-    ip_address: string
-    os_system: string
-    os_version: string
-    ssh_banner: string | null
-    ssh_port_open: boolean
-    rdp_port_open: boolean
-    smb_port_open: boolean
-    confidence: string
-    detail: string
-  } }> {
-    return api.post('/devices/detect-os', { ip_address: ipAddress, credential_id: credentialId || null })
+  detectOS(
+    ipAddress: string,
+    options: {
+      deviceId?: number | null
+      credentialId?: number | null
+      username?: string
+      password?: string
+      winrmPort?: number
+    } = {},
+  ): Promise<{
+    data: {
+      ip_address: string
+      os_system: string
+      os_version: string
+      ssh_banner: string | null
+      ssh_port_open: boolean
+      winrm_port_open: boolean
+      rdp_port_open: boolean
+      smb_port_open: boolean
+      confidence: string
+      detail: string
+    }
+  }> {
+    return api.post('/devices/detect-os', {
+      ip_address: ipAddress,
+      device_id: options.deviceId || null,
+      username: options.username || null,
+      password: options.password || null,
+      winrm_port: options.winrmPort || null,
+    })
+  },
+
+  downloadWinrmSetupScript(
+    targetIp: string,
+    winrmPort = 5985,
+  ): Promise<{ data: Blob; headers: Record<string, string> }> {
+    return api.get('/devices/winrm-setup-script', {
+      params: { target_ip: targetIp, winrm_port: winrmPort },
+      responseType: 'blob',
+    })
   },
 }
 
-// ---------- Connections ----------
-export const connectionAPI = {
-  list(): Promise<{ data: Connection[] }> {
-    return api.get('/connections')
+// ---------- Docker Containers ----------
+export const containersAPI = {
+  list(): Promise<{ data: { items: DeviceContainersEntry[] } }> {
+    return api.get('/containers')
   },
-
-  create(data: Partial<Connection>): Promise<{ data: Connection }> {
-    return api.post('/connections', data)
+  device(id: number): Promise<{ data: DeviceContainersEntry }> {
+    return api.get(`/containers/${id}`)
   },
+  control(
+    id: number,
+    action: string,
+    name: string,
+    keepVolumes?: boolean,
+  ): Promise<{ data: { success: boolean; message: string } }> {
+    return api.post(
+      `/containers/${id}/control`,
+      // remove 之外的 action 后端会忽略 keep_volumes,不必条件性省略
+      { action, name, keep_volumes: keepVolumes },
+      { timeout: 60000 },
+    )
+  },
+  logs(
+    id: number,
+    name: string,
+    tail: number,
+  ): Promise<{ data: { container: string; tail: number; exit_code: number; log: string } }> {
+    return api.get(`/containers/${id}/logs/${encodeURIComponent(name)}`, { params: { tail }, timeout: 60000 })
+  },
+  // PVE 虚机容器终端票据(kind=pve-remote + container;设备目标走 terminalAPI.ticket)
+  terminalTicket(id: number, container: string): Promise<{ data: { ticket: string } }> {
+    return api.post(`/containers/${id}/terminal-ticket`, { container }, { timeout: 15000 })
+  },
+}
 
-  delete(id: number): Promise<void> {
-    return api.delete(`/connections/${id}`)
+// ---------- Business Monitoring(业务/接口) ----------
+export const businessAPI = {
+  list(): Promise<{ data: BusinessHealthItem[] }> {
+    return api.get('/businesses')
+  },
+  detail(id: number): Promise<{ data: BusinessDetail }> {
+    return api.get(`/businesses/${id}`)
+  },
+  create(data: { name: string; description?: string }): Promise<{ data: { id: number } }> {
+    return api.post('/businesses', data)
+  },
+  update(id: number, data: { name?: string; description?: string }): Promise<void> {
+    return api.put(`/businesses/${id}`, data)
+  },
+  remove(id: number): Promise<void> {
+    return api.delete(`/businesses/${id}`)
+  },
+  createInterface(businessId: number, data: InterfaceForm): Promise<{ data: BusinessDetail }> {
+    return api.post(`/businesses/${businessId}/interfaces`, data)
+  },
+  linkServers(businessId: number, deviceIds: number[]): Promise<{ data: BusinessDetail }> {
+    return api.post(`/businesses/${businessId}/servers/batch`, { ids: deviceIds })
+  },
+  unlinkServer(businessId: number, deviceId: number): Promise<{ data: BusinessDetail }> {
+    return api.delete(`/businesses/${businessId}/servers/${deviceId}`)
+  },
+  guestCandidates(): Promise<{ data: PveGuestCandidate[] }> {
+    return api.get('/businesses/pve-guest-candidates')
+  },
+  linkGuests(
+    businessId: number,
+    items: Array<{ connection_id: number; guest_type: string; vmid: number; name?: string }>,
+  ): Promise<{ data: BusinessDetail }> {
+    return api.post(`/businesses/${businessId}/guests/batch`, { items })
+  },
+  unlinkGuest(businessId: number, linkId: number): Promise<{ data: BusinessDetail }> {
+    return api.delete(`/businesses/${businessId}/guests/${linkId}`)
+  },
+  unlinkInterface(businessId: number, interfaceId: number): Promise<{ data: BusinessDetail }> {
+    return api.delete(`/businesses/${businessId}/interfaces/${interfaceId}`)
+  },
+}
+
+// 接口生命周期从属业务:创建走 businessAPI.createInterface(新建并关联),
+// 编辑/删除走这里;曾经存在独立的「接口管理页」API(list/create/remove)与
+// 「关联已有接口」API(linkInterfaces/linkInterface),前端从未接入,端点已
+// 于 2026-09-17 删除,勿加回。
+export const interfaceAPI = {
+  update(id: number, data: Partial<InterfaceForm>): Promise<void> {
+    return api.put(`/service-interfaces/${id}`, data)
+  },
+}
+
+// ---------- PVE(Proxmox 虚拟化平台) ----------
+export const pveAPI = {
+  listConnections(): Promise<{ data: PveConnection[] }> {
+    return api.get('/pve/connections')
+  },
+  createConnection(data: Partial<PveConnection> & { token_secret: string }): Promise<{ data: PveConnection }> {
+    return api.post('/pve/connections', data)
+  },
+  updateConnection(
+    id: number,
+    data: Partial<PveConnection> & { token_secret?: string },
+  ): Promise<{ data: PveConnection }> {
+    return api.put(`/pve/connections/${id}`, data)
+  },
+  deleteConnection(id: number): Promise<void> {
+    return api.delete(`/pve/connections/${id}`)
+  },
+  testConnection(id: number): Promise<{ data: { ok: boolean; version: string } }> {
+    return api.post(`/pve/connections/${id}/test`)
+  },
+  overview(connId: number): Promise<{ data: { nodes: PveNode[]; guests: PveGuest[] } }> {
+    // force=true 跳过后端 cluster/resources 的 12s 缓存。
+    // 前端 10s 轮询若命中缓存,所有 IO 计数器会与上次完全一致,
+    // 速率计算要么归 0、要么停在「采样中」——必须每次拿实时数据。
+    return api.get(`/pve/connections/${connId}/overview`, { params: { force: true } })
+  },
+  listNodes(connId: number): Promise<{ data: PveNode[] }> {
+    return api.get(`/pve/connections/${connId}/nodes`)
+  },
+  guestDetail(
+    connId: number,
+    gtype: string,
+    vmid: number,
+  ): Promise<{
+    data: {
+      status: Record<string, unknown>
+      config: Record<string, unknown>
+      guest_agent: import('@/types/pve').PveGuest['guest_agent']
+    }
+  }> {
+    return api.get(`/pve/connections/${connId}/guests/${gtype}/${vmid}`)
+  },
+  guestBinding(
+    connId: number,
+    gtype: string,
+    vmid: number,
+    node?: string,
+  ): Promise<{ data: import('@/types/pve').PveGuestBinding }> {
+    return api.get(`/pve/connections/${connId}/guests/${gtype}/${vmid}/binding`, {
+      params: node ? { node } : undefined,
+    })
+  },
+  detectGuestBindingOs(
+    connId: number,
+    gtype: string,
+    vmid: number,
+    data: {
+      ip_address?: string
+      username?: string
+      password?: string
+      winrm_port?: number
+    },
+  ): Promise<{
+    data: {
+      ip_address?: string
+      os_system: string
+      os_version: string
+      ssh_banner: string | null
+      ssh_port_open: boolean
+      winrm_port_open: boolean
+      rdp_port_open: boolean
+      smb_port_open: boolean
+      confidence: string
+      detail: string
+    }
+  }> {
+    return api.post(`/pve/connections/${connId}/guests/${gtype}/${vmid}/binding/detect-os`, data)
+  },
+  updateGuestBinding(
+    connId: number,
+    gtype: string,
+    vmid: number,
+    data: {
+      ip_address?: string
+      os_system: 'linux' | 'windows' | 'unknown'
+      ssh_port: number
+      winrm_port: number
+      username: string
+      password?: string
+      ssh_key?: string
+      enabled: boolean
+    },
+    node?: string,
+  ): Promise<{ data: import('@/types/pve').PveGuestBinding }> {
+    return api.put(`/pve/connections/${connId}/guests/${gtype}/${vmid}/binding`, data, {
+      params: node ? { node } : undefined,
+    })
+  },
+  testGuestBinding(connId: number, gtype: string, vmid: number): Promise<{ data: { ok: boolean; message: string } }> {
+    return api.post(`/pve/connections/${connId}/guests/${gtype}/${vmid}/binding/test`, null, { timeout: 30000 })
+  },
+  downloadGuestWinrmSetupScript(
+    connId: number,
+    gtype: string,
+    vmid: number,
+  ): Promise<{ data: Blob; headers: Record<string, string> }> {
+    return api.get(`/pve/connections/${connId}/guests/${gtype}/${vmid}/winrm-setup-script`, {
+      responseType: 'blob',
+    })
+  },
+  guestHistory(
+    connId: number,
+    gtype: string,
+    vmid: number,
+    range: string,
+    node?: string,
+  ): Promise<{ data: { range: string; timeframe: string; items: PveRrdPoint[] } }> {
+    return api.get(`/pve/connections/${connId}/guests/${gtype}/${vmid}/history`, {
+      params: { range, ...(node ? { node } : {}) },
+    })
+  },
+  // 全部运行中 guest 的最新 RRD 速率(批量),用于列表页首轮预填,避免差值基线空转 ~10s
+  guestsRrdLatest(connId: number): Promise<{ data: { items: Record<string, PveRrdPoint> } }> {
+    return api.get(`/pve/connections/${connId}/guests/rrd-latest`)
+  },
+  power(
+    connId: number,
+    gtype: string,
+    vmid: number,
+    action: string,
+  ): Promise<{ data: { success: boolean; message: string } }> {
+    return api.post(`/pve/connections/${connId}/guests/${gtype}/${vmid}/power`, { action })
+  },
+  snapshots(connId: number, gtype: string, vmid: number, node?: string): Promise<{ data: PveSnapshot[] }> {
+    return api.get(`/pve/connections/${connId}/guests/${gtype}/${vmid}/snapshots`, {
+      params: node ? { node } : undefined,
+    })
+  },
+  createSnapshot(connId: number, gtype: string, vmid: number, snapname: string, description: string): Promise<unknown> {
+    return api.post(`/pve/connections/${connId}/guests/${gtype}/${vmid}/snapshots`, { snapname, description })
+  },
+  deleteSnapshot(connId: number, gtype: string, vmid: number, snapname: string): Promise<unknown> {
+    return api.delete(`/pve/connections/${connId}/guests/${gtype}/${vmid}/snapshots/${encodeURIComponent(snapname)}`)
+  },
+  rollbackSnapshot(connId: number, gtype: string, vmid: number, snapname: string): Promise<unknown> {
+    return api.post(
+      `/pve/connections/${connId}/guests/${gtype}/${vmid}/snapshots/${encodeURIComponent(snapname)}/rollback`,
+    )
+  },
+  createGuest(connId: number, gtype: 'qemu', body: PveGuestCreate): Promise<{ data: PveGuestCreateResult }> {
+    return api.post(`/pve/connections/${connId}/guests/${gtype}`, body)
+  },
+  cloneGuest(
+    connId: number,
+    gtype: string,
+    vmid: number,
+    body: { newid?: number; name?: string; full?: boolean; description?: string },
+  ): Promise<{ data: PveGuestCloneResult }> {
+    return api.post(`/pve/connections/${connId}/guests/${gtype}/${vmid}/clone`, body)
+  },
+  /** 删除前预览：该虚机引用了哪些卷、销毁时哪些会被清掉、平台侧还有哪些引用。 */
+  guestVolumes(connId: number, gtype: string, vmid: number, node?: string): Promise<{ data: PveGuestVolumePreview }> {
+    return api.get(`/pve/connections/${connId}/guests/${gtype}/${vmid}/volumes`, {
+      params: node ? { node } : undefined,
+    })
+  },
+  /**
+   * 销毁虚机/LXC。purge 会连带删除虚机拥有的磁盘卷与快照，
+   * destroyUnreferencedDisks 再清掉 unused* 残留卷；force 表示运行中先强制停机。
+   * 后端会同步等 PVE 销毁任务终态:强制停机最长 60s + 任务等待 60s，
+   * 故超时放宽到 180s。
+   */
+  deleteGuest(
+    connId: number,
+    gtype: string,
+    vmid: number,
+    options: { purge?: boolean; destroyUnreferencedDisks?: boolean; force?: boolean } = {},
+  ): Promise<{ data: PveGuestDeleteResult }> {
+    const { purge = true, destroyUnreferencedDisks = true, force = false } = options
+    return api.delete(`/pve/connections/${connId}/guests/${gtype}/${vmid}`, {
+      params: { purge, destroy_unreferenced_disks: destroyUnreferencedDisks, force },
+      timeout: 180000,
+    })
+  },
+  /** 调整虚机 CPU/内存/磁盘容量(磁盘只扩不缩;部分改动需重启生效)。 */
+  updateGuestConfig(
+    connId: number,
+    gtype: string,
+    vmid: number,
+    body: PveGuestConfigUpdate,
+    node?: string,
+  ): Promise<{ data: PveGuestConfigUpdateResult }> {
+    return api.put(`/pve/connections/${connId}/guests/${gtype}/${vmid}/config`, body, {
+      params: node ? { node } : undefined,
+    })
+  },
+  /** 查询 PVE 异步任务(创建/克隆/销毁/快照)的执行状态。 */
+  taskStatus(connId: number, node: string, upid: string): Promise<{ data: PveTaskStatus }> {
+    return api.get(`/pve/connections/${connId}/task-status`, { params: { node, upid } })
+  },
+  nextId(connId: number): Promise<{ data: { vmid: number } }> {
+    return api.get(`/pve/connections/${connId}/nextid`)
+  },
+  isos(connId: number, node: string, storage: string): Promise<{ data: { volid: string }[] }> {
+    return api.get(`/pve/connections/${connId}/nodes/${node}/isos`, { params: { storage } })
+  },
+  /** 节点存储列表(新建虚机的存储下拉用;后端 30s 节点缓存,重复打开无压力)。 */
+  storage(connId: number, node: string): Promise<{ data: PveNodeStorage[] }> {
+    return api.get(`/pve/connections/${connId}/nodes/${node}/storage`)
+  },
+  consoleTicket(
+    connId: number,
+    gtype: string,
+    vmid: number,
+    forcePve = false,
+    width?: number,
+    height?: number,
+  ): Promise<{
+    data: {
+      mode: 'pve' | 'ssh' | 'rdp'
+      ticket: string
+      vncticket?: string
+      node?: string
+      /** SSH/RDP 模式下的合成目标 ID（负数），文件传输接口按它寻址虚拟机。 */
+      target_id?: number
+    }
+  }> {
+    return api.post(`/pve/connections/${connId}/guests/${gtype}/${vmid}/console-ticket`, null, {
+      params: {
+        ...(forcePve ? { force_pve: true } : {}),
+        ...(width ? { width } : {}),
+        ...(height ? { height } : {}),
+      },
+    })
+  },
+}
+
+// ---------- 顶栏全局搜索 ----------
+export const searchAPI = {
+  global(q: string): Promise<{ data: import('@/types/search').SearchResults }> {
+    return api.get('/search', { params: { q } })
   },
 }
 
@@ -219,100 +693,27 @@ export const monitorAPI = {
   triggerScan(): Promise<{ data: { statuses: Record<string, string> } }> {
     return api.post('/monitor/scan')
   },
-
-  getStats(): Promise<{ data: { total: number; online: number; offline: number; maintenance: number } }> {
-    return api.get('/monitor/stats')
-  },
-
-  getInterfaces(rackId: number): Promise<{ data: InterfaceStatusResponse }> {
-    return api.get(`/monitor/interfaces`, { params: { rack_id: rackId } })
-  },
-}
-
-// ---------- Credentials ----------
-export const credentialAPI = {
-  list(): Promise<{ data: Credential[] }> {
-    return api.get('/credentials')
-  },
-
-  create(data: Partial<Credential> & { password?: string; ssh_key?: string }): Promise<{ data: Credential }> {
-    return api.post('/credentials', data)
-  },
-
-  get(id: number): Promise<{ data: Credential }> {
-    return api.get(`/credentials/${id}`)
-  },
-
-  update(id: number, data: Partial<Credential> & { password?: string; ssh_key?: string }): Promise<{ data: Credential }> {
-    return api.put(`/credentials/${id}`, data)
-  },
-
-  delete(id: number): Promise<void> {
-    return api.delete(`/credentials/${id}`)
-  },
-
-  decrypt(id: number): Promise<{ data: { username: string; password: string; ssh_key: string } }> {
-    return api.get(`/credentials/${id}/decrypt`)
-  },
-
-  bindDevices(id: number, deviceIds: number[]): Promise<void> {
-    return api.put(`/credentials/${id}/devices`, { device_ids: deviceIds })
-  },
-
-  allDevicesForBinding(): Promise<{ data: { id: number; name: string; ip_address: string | null; type: string; credential_id: number | null; rack_id: number }[] }> {
-    return api.get('/credentials/all-devices')
-  },
 }
 
 export default api
 
-// ---------- Settings ----------
-export const settingsAPI = {
-  get(): Promise<{ data: Record<string, string> }> {
-    return api.get('/settings')
-  },
-  update(settings: Record<string, string>): Promise<{ data: Record<string, string> }> {
-    return api.put('/settings', { settings })
-  },
-}
-
-// ---------- Audit ----------
-export const auditAPI = {
-  listLogs(params?: { device_id?: number; event_type?: string; username?: string; limit?: number }): Promise<{ data: any[] }> {
-    return api.get('/audit-logs', { params })
-  },
-  listRecordings(params?: { username?: string; start_date?: string; end_date?: string }): Promise<{ data: any[] }> {
-    return api.get('/recordings', { params })
-  },
-  getRecordingData(id: number): Promise<{ data: { data: string } }> {
-    return api.get(`/recordings/${id}/download`)
-  },
-  listSessions(params?: { username?: string; start_date?: string; end_date?: string; limit?: number }): Promise<{ data: any[] }> {
-    return api.get('/audit-sessions', { params })
-  },
-  getSessionCommands(sessionId: string): Promise<{ data: any[] }> {
-    return api.get(`/audit-sessions/${sessionId}/commands`)
-  },
-  listAuditUsers(): Promise<{ data: string[] }> {
-    return api.get('/audit-users')
-  },
-
-  listLoginHistory(params?: { username?: string; start_date?: string; end_date?: string; limit?: number }): Promise<{ data: { id: number; username: string; ip: string | null; created_at: string }[] }> {
-    return api.get('/login-history', { params })
-  },
-
-  listScriptRecords(params?: { username?: string; start_date?: string; end_date?: string; limit?: number }): Promise<{ data: any[] }> {
-    return api.get('/script-records', { params })
-  },
-}
-
 // ---------- Users ----------
 export const userAPI = {
-  list(): Promise<{ data: User[] }> { return api.get('/users') },
-  create(data: Partial<User> & { password: string }): Promise<{ data: User }> { return api.post('/users', data) },
-  get(id: number): Promise<{ data: User }> { return api.get(`/users/${id}`) },
-  update(id: number, data: Partial<User> & { password?: string }): Promise<{ data: User }> { return api.put(`/users/${id}`, data) },
-  delete(id: number): Promise<void> { return api.delete(`/users/${id}`) },
+  list(): Promise<{ data: User[] }> {
+    return api.get('/users')
+  },
+  create(data: Partial<User> & { password: string }): Promise<{ data: User }> {
+    return api.post('/users', data)
+  },
+  get(id: number): Promise<{ data: User }> {
+    return api.get(`/users/${id}`)
+  },
+  update(id: number, data: Partial<User> & { password?: string }): Promise<{ data: User }> {
+    return api.put(`/users/${id}`, data)
+  },
+  delete(id: number): Promise<void> {
+    return api.delete(`/users/${id}`)
+  },
   toggleActive(id: number, active: boolean): Promise<void> {
     return api.put(`/users/${id}/toggle-active`, { is_active: active ? 1 : 0 })
   },
@@ -320,25 +721,45 @@ export const userAPI = {
 
 // ---------- Roles ----------
 export const roleAPI = {
-  list(): Promise<{ data: Role[] }> { return api.get('/roles') },
-  create(data: Partial<Role>): Promise<{ data: Role }> { return api.post('/roles', data) },
-  get(id: number): Promise<{ data: Role }> { return api.get(`/roles/${id}`) },
-  update(id: number, data: Partial<Role>): Promise<{ data: Role }> { return api.put(`/roles/${id}`, data) },
-  delete(id: number): Promise<void> { return api.delete(`/roles/${id}`) },
-  permissions(): Promise<{ data: { permissions: { key: string; label: string }[]; groups: { label: string; permissions: string[] }[] } }> { return api.get('/permissions') },
-}
-
-// ---------- User Groups ----------
-export const groupAPI = {
-  list(): Promise<{ data: UserGroup[] }> { return api.get('/user-groups') },
-  create(data: Partial<UserGroup>): Promise<{ data: UserGroup }> { return api.post('/user-groups', data) },
-  update(id: number, data: Partial<UserGroup>): Promise<{ data: UserGroup }> { return api.put(`/user-groups/${id}`, data) },
-  delete(id: number): Promise<void> { return api.delete(`/user-groups/${id}`) },
+  list(): Promise<{ data: Role[] }> {
+    return api.get('/roles')
+  },
+  create(data: Partial<Role>): Promise<{ data: Role }> {
+    return api.post('/roles', data)
+  },
+  get(id: number): Promise<{ data: Role }> {
+    return api.get(`/roles/${id}`)
+  },
+  update(id: number, data: Partial<Role>): Promise<{ data: Role }> {
+    return api.put(`/roles/${id}`, data)
+  },
+  delete(id: number): Promise<void> {
+    return api.delete(`/roles/${id}`)
+  },
+  permissions(): Promise<{
+    data: { permissions: { key: string; label: string }[]; groups: { label: string; permissions: string[] }[] }
+  }> {
+    return api.get('/permissions')
+  },
+  /** 角色授权用的虚拟机候选项（不做调用者自身 ACL 过滤）。 */
+  pveGuestCandidates(): Promise<{ data: PveGuestCandidate[] }> {
+    return api.get('/roles/pve-guest-candidates')
+  },
 }
 
 // ---------- Scripts ----------
 export const scriptAPI = {
-  listDevices(): Promise<{ data: { id: number; name: string; ip_address: string | null; type: string; status: string; os_system: string | null; credential_id: number | null }[] }> {
+  listDevices(): Promise<{
+    data: {
+      id: number
+      name: string
+      ip_address: string | null
+      type: string
+      status: string
+      os_system: string | null
+      has_credential: boolean
+    }[]
+  }> {
     return api.get('/scripts/devices')
   },
   execute(data: {
@@ -359,31 +780,6 @@ export const scriptAPI = {
   },
 }
 
-// ---------- Scheduled Tasks ----------
-export const scheduledTaskAPI = {
-  list(): Promise<{ data: ScheduledTask[] }> {
-    return api.get('/scheduled-tasks')
-  },
-  create(data: {
-    name: string
-    command: string
-    device_ids: number[]
-    schedule_type: string
-    scheduled_at?: string
-    cron_expression?: string
-    timeout?: number
-    credential_id?: number
-  }): Promise<{ data: ScheduledTask }> {
-    return api.post('/scheduled-tasks', data)
-  },
-  update(id: number, data: Record<string, any>): Promise<{ data: ScheduledTask }> {
-    return api.put(`/scheduled-tasks/${id}`, data)
-  },
-  delete(id: number): Promise<void> {
-    return api.delete(`/scheduled-tasks/${id}`)
-  },
-}
-
 // ---------- Dashboard (Big Screen) ----------
 export const dashboardAPI = {
   getOverview(): Promise<{ data: DashboardOverview }> {
@@ -394,15 +790,6 @@ export const dashboardAPI = {
   },
   getRoomSummary(): Promise<{ data: { rooms: RoomSummaryItem[] } }> {
     return api.get('/dashboard/room-summary')
-  },
-  getConnectionTopology(): Promise<{ data: { nodes: TopologyNode[]; edges: TopologyEdge[] } }> {
-    return api.get('/dashboard/connection-topology')
-  },
-  getAuditTimeline(): Promise<{ data: { recent_events: AuditEventItem[]; event_counts_today: Record<string, number> } }> {
-    return api.get('/dashboard/audit-timeline')
-  },
-  getLoginTrend(days: number = 7): Promise<{ data: { trend: LoginTrendItem[] } }> {
-    return api.get('/dashboard/login-trend', { params: { days } })
   },
 }
 
@@ -433,7 +820,265 @@ export const inspectionAPI = {
   deleteRecord(id: number): Promise<void> {
     return api.delete(`/inspection/records/${id}`)
   },
-  getReport(params?: { start_date?: string; end_date?: string; target_type?: string }): Promise<{ data: InspectionReport }> {
+  getReport(params?: {
+    start_date?: string
+    end_date?: string
+    target_type?: string
+  }): Promise<{ data: InspectionReport }> {
     return api.get('/inspection/report', { params })
+  },
+  // 巡检阈值表:指标页 / PVE / 容器页共用一套配色口径,权限是 device:view 而非 automation:manage
+  getThresholds(): Promise<{ data: MetricThresholdsResponse }> {
+    return api.get('/inspection/thresholds')
+  },
+}
+
+// ---------- Server Metrics ----------
+export const metricsAPI = {
+  list(): Promise<{ data: MetricsDeviceList }> {
+    return api.get('/metrics/devices')
+  },
+  /** 手动触发一轮真实采集(耗时可达一个采集周期,复用后端串行锁) */
+  collect(): Promise<{ data: { total: number; available: number } }> {
+    return api.post('/metrics/collect', null, { timeout: 120000 })
+  },
+  detail(id: number): Promise<{ data: MetricsDeviceDetail }> {
+    return api.get(`/metrics/devices/${id}`)
+  },
+  history(id: number, range: MetricsRange): Promise<{ data: MetricsHistory }> {
+    return api.get(`/metrics/devices/${id}/history`, { params: { range } })
+  },
+  /** 全部服务器 CPU / 内存曲线(首页概览，一次请求返回) */
+  trend(range: MetricsRange): Promise<{ data: MetricsTrend }> {
+    return api.get('/metrics/history', { params: { range } })
+  },
+}
+
+// ---------- Agent(只读诊断) ----------
+export const agentAPI = {
+  status(): Promise<{ data: AgentStatus }> {
+    return api.get('/agent/status')
+  },
+  devices(): Promise<{ data: AgentDevice[] }> {
+    return api.get('/agent/devices')
+  },
+  diagnose(deviceId: number, question: string): Promise<{ data: AgentDiagnoseStart }> {
+    // 异步执行:立即返回 run_id,前端轮询 getRun 获取实时进度
+    return api.post('/agent/diagnose', { device_id: deviceId, question }, { timeout: 15000 })
+  },
+  getRun(runId: number): Promise<{ data: AgentRunDetail }> {
+    return api.get(`/agent/runs/${runId}`)
+  },
+  listRuns(params?: {
+    device_id?: number
+    page?: number
+    page_size?: number
+  }): Promise<{ data: { total: number; items: AgentRunSummary[] } }> {
+    return api.get('/agent/runs', { params })
+  },
+  getConfig(): Promise<{ data: AgentConfig }> {
+    return api.get('/agent/config')
+  },
+  updateConfig(data: {
+    enabled: boolean
+    base_url: string
+    model: string
+    api_key: string
+    max_steps: number
+  }): Promise<{ data: AgentConfig }> {
+    return api.put('/agent/config', data)
+  },
+  testConfig(): Promise<{ data: { ok: boolean; message: string } }> {
+    return api.post('/agent/config/test', null, { timeout: 30000 })
+  },
+  listModels(baseUrl: string, apiKey: string): Promise<{ data: { models: string[] } }> {
+    return api.post('/agent/config/models', { base_url: baseUrl, api_key: apiKey }, { timeout: 20000 })
+  },
+}
+
+// ---------- Webhook alerts ----------
+export const webhookAPI = {
+  list(): Promise<{ data: Webhook[] }> {
+    return api.get('/webhooks')
+  },
+  create(data: WebhookCreate): Promise<{ data: Webhook }> {
+    return api.post('/webhooks', data)
+  },
+  update(id: number, data: WebhookUpdate): Promise<{ data: Webhook }> {
+    return api.put(`/webhooks/${id}`, data)
+  },
+  remove(id: number): Promise<void> {
+    return api.delete(`/webhooks/${id}`)
+  },
+  test(id: number): Promise<{
+    data: {
+      ok: boolean
+      status_code: number | null
+      message: string
+      duration_ms: number
+      response_preview: string | null
+    }
+  }> {
+    return api.post(`/webhooks/${id}/test`)
+  },
+  /** 飞书通讯录:部门与成员，用于直接选择告警接收人 */
+  feishuDepartments(data: FeishuDirectoryRequest): Promise<{ data: FeishuDepartmentPage }> {
+    return api.post('/webhooks/feishu/departments', data)
+  },
+  feishuUsers(data: FeishuDirectoryRequest): Promise<{ data: FeishuUserPage }> {
+    return api.post('/webhooks/feishu/users', data)
+  },
+}
+
+export const alertAPI = {
+  overview(): Promise<{ data: AlertOverview }> {
+    return api.get('/alerts/overview')
+  },
+  containers(): Promise<{
+    data: {
+      container_id: string
+      name: string
+      device_id: number | null
+      device_name: string
+      state: string
+      status: string
+      /** 宿主身份:设备为正 id,虚拟机为合成负数 id */
+      target_id: number
+      host_kind: 'device' | 'pve_guest'
+    }[]
+  }> {
+    return api.get('/alerts/containers')
+  },
+  businesses(): Promise<{ data: { business_id: number; name: string }[] }> {
+    return api.get('/alerts/businesses')
+  },
+  rules(): Promise<{ data: AlertRule[] }> {
+    return api.get('/alerts/rules')
+  },
+  createRule(data: Partial<AlertRule>): Promise<{ data: AlertRule }> {
+    return api.post('/alerts/rules', data)
+  },
+  updateRule(id: number, data: Partial<AlertRule>): Promise<{ data: AlertRule }> {
+    return api.put(`/alerts/rules/${id}`, data)
+  },
+  deleteRule(id: number): Promise<{ data: { message: string; closed_event_count: number } }> {
+    return api.delete(`/alerts/rules/${id}`)
+  },
+  /** 告警事件列表;带 page 时返回分页对象(历史检索),不带时返回纯数组(旧兼容) */
+  events(params?: {
+    status?: string
+    severity?: string
+    metric?: string
+    q?: string
+    since?: string
+    until?: string
+    page?: number
+    page_size?: number
+  }): Promise<{ data: AlertEventsPage }> {
+    return api.get('/alerts/events', { params })
+  },
+  /** 单条告警详情(含 Agent 归因分析全文) */
+  event(id: number): Promise<{ data: AlertEvent }> {
+    return api.get(`/alerts/events/${id}`)
+  },
+  /** 手动触发一次自动处置:离线虚拟机 / 容器立即尝试拉起 */
+  remediateEvent(id: number): Promise<{ data: AlertEvent }> {
+    return api.post(`/alerts/events/${id}/remediate`)
+  },
+  /** 手动触发一次 Agent 只读归因分析(CPU / 内存 / 磁盘过高) */
+  analyzeEvent(id: number): Promise<{ data: AlertEvent }> {
+    return api.post(`/alerts/events/${id}/analyze`)
+  },
+  /** 站内「已知晓」:该事件恢复前不再重复提醒 */
+  ackEvent(id: number): Promise<{ data: AlertEvent }> {
+    return api.post(`/alerts/events/${id}/ack`)
+  },
+  maintenanceWindows(): Promise<{ data: MaintenanceWindow[] }> {
+    return api.get('/alerts/maintenance-windows')
+  },
+  /** 展示文案字典(后端为唯一真源,避免两份维护漂移) */
+  labels(): Promise<{
+    data: {
+      metrics: Record<string, string>
+      severities: Record<string, string>
+      remediation_states: Record<string, string>
+      analysis_states: Record<string, string>
+      notify_status: Record<string, string>
+    }
+  }> {
+    return api.get('/alerts/labels')
+  },
+  createMaintenanceWindow(data: {
+    name: string
+    target_ids: number[] | null
+    start_at: string
+    end_at: string
+  }): Promise<{ data: MaintenanceWindow }> {
+    return api.post('/alerts/maintenance-windows', data)
+  },
+  finishMaintenanceWindow(id: number): Promise<{ data: MaintenanceWindow }> {
+    return api.post(`/alerts/maintenance-windows/${id}/finish`)
+  },
+  deleteMaintenanceWindow(id: number): Promise<{ data: { message: string } }> {
+    return api.delete(`/alerts/maintenance-windows/${id}`)
+  },
+}
+
+// ---------- Unified Automation ----------
+export const automationAPI = {
+  devices(): Promise<{ data: AutomationDevice[] }> {
+    return api.get('/automation/devices')
+  },
+  createJob(data: {
+    name: string
+    job_type: AutomationJobType
+    device_ids: number[]
+    config: Record<string, any>
+  }): Promise<{ data: AutomationJob }> {
+    return api.post('/automation/jobs', data)
+  },
+  jobs(params?: {
+    job_type?: AutomationJobType | ''
+    status?: string
+    page?: number
+    page_size?: number
+  }): Promise<{ data: { items: AutomationJobListItem[]; total: number; page: number; page_size: number } }> {
+    return api.get('/automation/jobs', { params })
+  },
+  job(id: number): Promise<{ data: AutomationJob }> {
+    return api.get(`/automation/jobs/${id}`)
+  },
+  schedules(): Promise<{ data: AutomationSchedule[] }> {
+    return api.get('/automation/schedules')
+  },
+  createSchedule(data: {
+    name: string
+    job_type: AutomationJobType
+    device_ids: number[]
+    config: Record<string, any>
+    schedule_type: 'once' | 'recurring'
+    scheduled_at?: string
+    cron_expression?: string
+  }): Promise<{ data: AutomationSchedule }> {
+    return api.post('/automation/schedules', data)
+  },
+  deleteSchedule(id: number): Promise<void> {
+    return api.delete(`/automation/schedules/${id}`)
+  },
+  updateSchedule(
+    id: number,
+    data: {
+      name?: string
+      device_ids?: number[]
+      config?: Record<string, any>
+      schedule_type?: 'once' | 'recurring'
+      scheduled_at?: string
+      cron_expression?: string
+    },
+  ): Promise<{ data: AutomationSchedule }> {
+    return api.put(`/automation/schedules/${id}`, data)
+  },
+  setScheduleStatus(id: number, status: 'active' | 'paused'): Promise<{ data: AutomationSchedule }> {
+    return api.patch(`/automation/schedules/${id}/status`, { status })
   },
 }

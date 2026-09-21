@@ -39,6 +39,8 @@ def create_access_token(
     permissions: list[str] | None = None,
     device_scope: str = "all",
     device_ids: list[int] | None = None,
+    pve_guests: list[str] | None = None,
+    session_version: int = 0,
 ) -> str:
     now = datetime.now(timezone.utc)
     expire = now + timedelta(hours=JWT_EXPIRE_HOURS)
@@ -49,6 +51,8 @@ def create_access_token(
         "permissions": permissions or [],
         "device_scope": device_scope,
         "device_ids": device_ids or [],
+        "pve_guests": pve_guests or [],
+        "session_version": session_version,
         "type": "access",
         "jti": str(uuid.uuid4()),
         "iat": now,
@@ -57,7 +61,7 @@ def create_access_token(
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def create_refresh_token(user_id: int) -> tuple[str, str]:
+def create_refresh_token(user_id: int, session_version: int = 0) -> tuple[str, str]:
     """创建 refresh token，返回 (token, jti)"""
     now = datetime.now(timezone.utc)
     jti = str(uuid.uuid4())
@@ -66,6 +70,7 @@ def create_refresh_token(user_id: int) -> tuple[str, str]:
         "sub": str(user_id),
         "type": "refresh",
         "jti": jti,
+        "session_version": session_version,
         "iat": now,
         "exp": expire,
     }
@@ -122,16 +127,29 @@ def get_current_user(
             detail="令牌已失效",
         )
 
-    user_id = int(payload.get("sub"))
+    try:
+        user_id = int(payload.get("sub"))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="令牌已失效",
+        ) from None
     user = db.query(User).filter(User.id == user_id).first()
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户不存在",
         )
+    if int(payload.get("session_version", 0)) != int(
+        getattr(user, "session_version", 0)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="令牌已失效"
+        )
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="账户已被禁用",
         )
+    request.state.user = user
     return user

@@ -16,7 +16,6 @@ class UserCreate(BaseModel):
     password: str = Field(min_length=8, max_length=128, description="密码至少8个字符")
     display_name: str | None = Field(None, max_length=128, description="显示名称")
     role_id: int | None = Field(None, description="角色ID")
-    group_id: int | None = Field(None, description="用户组ID")
     is_active: Literal[0, 1] = Field(1, description="是否启用: 0-禁用 1-启用")
 
     @field_validator("password")
@@ -34,7 +33,6 @@ class UserUpdate(BaseModel):
     )
     display_name: str | None = Field(None, max_length=128)
     role_id: int | None = None
-    group_id: int | None = None
     is_active: Literal[0, 1] | None = None
 
     @field_validator("password")
@@ -69,8 +67,6 @@ class UserResponse(BaseModel):
     is_active: int = 1
     role_id: int | None = None
     role_name: str | None = None
-    group_id: int | None = None
-    group_name: str | None = None
     created_at: datetime | None = None
 
     @field_serializer("created_at")
