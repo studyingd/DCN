@@ -1,6 +1,6 @@
 # DCN — 数据中心网络管理平台
 
-数据中心网络可视化与运维管理平台，提供机房机柜 2D 可视化、SSH/RDP 远程终端与 SFTP 文件管理、RBAC 权限控制、自动巡检、大屏监控等核心功能。
+数据中心网络可视化与运维管理平台，提供机房机柜 2D 可视化、PVE 虚拟化管理、SSH/RDP 远程终端与 SFTP 文件管理、服务器指标监控与告警自愈、RBAC 权限控制、自动巡检、批量脚本与 Agent 智能诊断、大屏监控等核心功能。
 
 ## 技术架构
 
@@ -106,6 +106,7 @@ graph TB
 | `device_metric_samples` | 服务器指标时序（CPU/内存/磁盘/负载/网络,默认保留 7 天） |
 | `maintenance_windows` | 告警静默窗口（维护期抑制通知，结束后推汇总卡） |
 | `agent_runs` | Agent 诊断记录（问题、执行步骤、报告全量留痕） |
+| `agent_action_approvals` | Agent 动作审批（命令定稿、决策留痕、超时作废） |
 | `automation_jobs` / `automation_job_targets` / `automation_job_steps` | 统一自动化任务与执行步骤 |
 | `automation_schedules` | 统一自动化计划 |
 | `device_docker_status` / `device_containers` / `container_actions` | 普通服务器及 PVE 虚拟机容器状态和操作记录 |
@@ -199,8 +200,8 @@ graph LR
 ### 自动化执行(批量脚本 / 巡检 / Agent 诊断)
 
 - 批量脚本:多设备并发下发(Linux 走 SSH,Windows 走 WinRM PowerShell)
-- **Agent 诊断(只读)**:LLM 驱动的服务器排障——用户描述问题,Agent 自主选择只读诊断项取证(CPU/内存/磁盘/IO/进程/服务/日志/端口等),输出结构化报告与处置建议
-  - **硬边界**:LLM 只能"点名"预置只读诊断项(`agent_commands.py` 注册表,key 白名单校验),永远不接触 shell 自由输入;注册表命令在加载期强制通过只读校验(不允许重定向/写操作动词/命令替换)
+- **Agent 诊断**:LLM 驱动的服务器排障——用户描述问题,Agent 自主选择诊断项取证(CPU/内存/磁盘/IO/进程/服务/日志/端口/容器等),输出结构化报告与处置建议。白名单只读取证自动执行;**写动作(拉起/重启/停止类)一律人工审批**——命令在提议时渲染定稿入库,批准的=执行的=审计留痕的同一字符串,审批超时自动作废,进程重启后绝不自动补执行
+  - **硬边界**:LLM 只能"点名"预置只读诊断项(`agent_commands.py` 注册表,key 白名单校验),永远不接触 shell 自由输入;注册表命令在加载期强制通过只读校验(不允许重定向/写操作动词/命令替换);白名单外的一次性只读命令(custom_read)走「静态只读屏 + 审批人看命令原文」双闸,永不自动执行
   - Windows「服务异常」诊断项与健康巡检**共用同一条命令**(`inspection_commands.WINDOWS_SCM_FAILURE_COMMAND`):两个面必须给出同一份事实,否则 Agent 报告与巡检结论会互相矛盾。注册进 Agent 时还会再过一次 `assert_readonly`,等于多一道安全网
   - 每次诊断的设备、问题、执行步骤、报告全量落 `agent_runs`;权限并入 `device:remote`（原独立键 `agent:use` 已下线）
   - LLM 走 OpenAI 兼容接口(可配置内网网关/自建模型),默认关闭
@@ -245,7 +246,7 @@ DCN/
 │   │   ├── exceptions.py            # 统一异常定义
 │   │   ├── validators.py            # 输入校验
 │   │   ├── utils.py                 # 工具函数
-│   │   ├── models/                  # ORM 模型（32 张表）
+│   │   ├── models/                  # ORM 模型（33 张表）
 │   │   ├── routers/                 # API 路由（22 个模块）
 │   │   │   ├── auth.py              # 认证（登录/登出/刷新/me/在线用户）
 │   │   │   ├── rooms.py             # 机房管理
@@ -378,7 +379,7 @@ PVE 平台不可达时虚拟机显示"状态未知"，且不计入业务健康�
 
 统一管理告警规则/事件、手动或计划自动化任务，以及告警 Webhook 通知。
 
-监控对象树（`GET /api/alerts/targets`）不列出 PVE **模板机**（`/cluster/resources` 里 `template=1` 的克隆源）：模板不运行也没有指标，纳进规则只会产生“永远离线”的假告警，还可能被自愈流程当成关机虚机去启动。同一个判定 `pve.is_guest_template` 也用在规则目标校验、`host_status` 评估和自愈解析上，历史规则里残留的模板目标会被标记为 `skipped` 并说明原因。
+规则目标中**不包含 PVE 模板机**（`/cluster/resources` 里 `template=1` 的克隆源）：模板不运行也没有指标，纳进规则只会产生“永远离线”的假告警，还可能被自愈流程当成关机虚机去启动。同一个判定 `pve.is_guest_template` 也用在规则保存时的目标校验、`host_status` 评估和自愈解析上，历史规则里残留的模板目标会被标记为 `skipped` 并说明原因。
 
 告警事件自带自愈能力（`backend/app/services/remediation.py`）：
 
@@ -421,10 +422,17 @@ Webhook 通道按 `provider` 区分（`backend/app/services/alerts.py`）：
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/agent/status` | Agent 启用/配置状态 |
-| GET | `/api/agent/devices` | 可诊断设备列表(server/cloud_server/host) |
-| GET | `/api/agent/catalog/{id}` | 设备可用的只读诊断项 |
-| POST | `/api/agent/diagnose` | 执行一次只读诊断(LLM tool-calling) |
+| GET | `/api/agent/devices` | 可诊断目标列表（服务器 + PVE 虚机，`kind` 字段区分，虚机为合成负数 id） |
+| GET | `/api/agent/catalog/{device_id}` | 目标可用的只读诊断项 |
+| POST | `/api/agent/diagnose` | 发起一次诊断（同步落任务记录；白名单只读取证自动执行，写动作需审批） |
 | GET | `/api/agent/runs` | 诊断历史 |
+| GET | `/api/agent/runs/{run_id}` | 诊断详情（步骤/动作/审批卡/报告） |
+| GET | `/api/agent/approvals` | 待审批动作列表 |
+| POST | `/api/agent/approvals/{approval_id}/approve` | 批准待审批动作（需 `automation:manage`） |
+| POST | `/api/agent/approvals/{approval_id}/reject` | 拒绝待审批动作（需 `automation:manage`） |
+| GET / PUT | `/api/agent/config` | Agent 全局配置读取/保存 |
+| POST | `/api/agent/config/test` | LLM 连通性测试 |
+| POST | `/api/agent/config/models` | 拉取可用模型列表 |
 
 ### 巡检 `/api/inspection`
 
