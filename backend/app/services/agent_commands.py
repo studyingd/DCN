@@ -52,7 +52,7 @@ _PS_WRITE_PATTERNS = [
     # 边界语义同 shell 侧(run 893 修正):动词前导排除字母数字/点/连字符/
     # 反斜杠,防 restart-worker、curl-proxy 这类容器名/路径片段误伤。
     r"(?<![\w.\\-])(?:Set|New|Remove|Stop|Start|Restart|Clear|Enable|Disable|Register|Unregister|Add|Rename|Copy|Move|Install|Uninstall|Kill|Send|Mount|Dismount)-\w+",
-    r"(?<![\w.\\-])Format-(?!Table\b)\w+",  # 只允许 Format-Table
+    r"(?<![\w.\\-])Format-(?!Table\b|List\b|Wide\b|Custom\b|Hex\b)\w+",  # 只允许输出格式化 Format-Table/List/Wide/Custom/Hex
     r"(?<![\w.\\-])Write-(?!Output\b)\w+",  # 只允许 Write-Output
     r"(?<![\w.\\-])(?:Out-File|Set-Content|Add-Content|Clear-Content)(?![\w.\-])",
     r"(?<![\w.\\-])(?:iex|Invoke-Expression|Invoke-Command|Invoke-WebRequest|iwr|curl|wget)(?![\w.\-])",

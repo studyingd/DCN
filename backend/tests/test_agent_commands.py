@@ -88,6 +88,9 @@ def test_shell_write_commands_rejected(cmd):
         "net user hacker /add",
         "reg add HKLM\\SOFTWARE\\x",
         "Rename-Computer -NewName x",
+        # Format-* 写命令仍拦(豁免名单只有输出格式化家族)
+        "Format-Volume -DriveLetter C",
+        "Get-Volume | Format-Volume",
     ],
 )
 def test_ps_write_commands_rejected(cmd):
@@ -131,6 +134,15 @@ def test_ps_write_commands_rejected(cmd):
         ("ls -la /data/sync", "sh"),
         ("cat /data/rm-backup/config.yaml", "sh"),
         ("docker logs --tail 40 curl-proxy-1", "ps"),
+        # Format-List 与 Format-Table 同为输出格式化(纯只读),曾误拦参数化
+        # 原语 process_detail 的 Windows 模板(实测:只读校验失败命中写原语
+        # 'Format-' 正则)——只读 Format 全家 Table/List/Wide/Custom/Hex 都豁免
+        (
+            "Get-CimInstance Win32_Process -Filter 'ProcessId=4212' | Format-List Name,ProcessId,CommandLine",
+            "ps",
+        ),
+        ("Get-Service | Format-List -Property Name,Status", "ps"),
+        ("Get-Process | Format-Wide -Column 4", "ps"),
     ],
 )
 def test_legit_readonly_commands_pass(cmd, shell):
