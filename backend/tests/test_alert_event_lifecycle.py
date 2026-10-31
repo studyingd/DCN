@@ -29,6 +29,7 @@ from app.models.device import Device
 from app.models.device_container import DeviceContainer, DeviceDockerStatus
 from app.models.maintenance_window import MaintenanceWindow
 from app.models.pve_connection import PveConnection
+from app.models.pve_guest_binding import PveGuestBinding
 from app.models.rack import Rack
 from app.models.role import Role
 from app.models.role_pve_guest_access import RolePveGuestAccess
@@ -46,6 +47,7 @@ from app.services.alerts import (
     close_events_of_disabled_rule,
     close_orphaned_alert_events,
     evaluate_alerts,
+    evaluate_container_alerts,
     notify_event,
     snooze_event,
 )
@@ -776,6 +778,183 @@ def test_sweep_keeps_container_event_while_container_listed(env):
     close_orphaned_alert_events()
 
     assert _reload(env.db, event.id).status == "open"
+
+
+def _container_rule(env, sustain=0):
+    """容器状态告警评估环境:threshold=0(值 1=异常 0=正常),不限定目标范围。"""
+    env.rule.metric = "container_status"
+    env.rule.severity = "critical"
+    env.rule.threshold = 0
+    env.rule.sustain_seconds = sustain
+    env.rule.target_device_ids = None
+    env.rule.target_container_ids = None
+    env.db.commit()
+
+
+def test_container_eval_triggers_on_non_running(env):
+    """钉住(收窄前置①):非 running 容器必须进评估集合并触发事件。"""
+    _container_rule(env)
+    container = DeviceContainer(
+        device_id=env.device.id,
+        container_id="cc-stop-01",
+        name="app-01",
+        state="exited",
+    )
+    env.db.add(container)
+    env.db.flush()
+    env.extra["containers"].append(container.id)
+    env.db.commit()
+
+    with patch("app.services.alerts._notify_event_in_background"):
+        evaluate_container_alerts()
+
+    env.db.rollback()
+    ev = (
+        env.db.query(AlertEvent)
+        .filter(
+            AlertEvent.rule_id == env.rule.id,
+            AlertEvent.resource_id == "cc-stop-01",
+            AlertEvent.status.in_(("pending", "open")),
+        )
+        .first()
+    )
+    assert ev is not None
+    assert ev.status == "open"  # sustain=0 立即 open
+
+
+def test_container_eval_resolves_when_running(env):
+    """钉住(收窄前置②):已 open 的容器回到 running 时必须仍在集合内触发 resolved。
+
+    只收窄到 state != 'running' 会漏掉恢复路径——异常容器回 running 那轮
+    必须进 resources 才能收敛,否则告警永远 open。
+    """
+    _container_rule(env)
+    event = env.make_event(
+        metric="container_status",
+        value=1.0,
+        threshold=0.0,
+        severity="critical",
+        resource_type="container",
+        resource_id="cc-rec-01",
+        resource_name=f"{env.device.name}/app-01",
+        status="open",
+        notification_status="sent",
+    )
+    container = DeviceContainer(
+        device_id=env.device.id,
+        container_id="cc-rec-01",
+        name="app-01",
+        state="running",
+    )
+    env.db.add(container)
+    env.db.flush()
+    env.extra["containers"].append(container.id)
+    env.db.commit()
+
+    with patch("app.services.alerts._notify_event_in_background"):
+        evaluate_container_alerts()
+
+    env.db.rollback()
+    row = env.db.query(AlertEvent).filter(AlertEvent.id == event.id).first()
+    assert row.status == "resolved"
+
+
+def test_container_eval_pending_covered_when_running(env):
+    """钉住(收窄前置③):pending(未通知)事件的容器即使 running 也必须被覆盖。
+
+    收窄后「running 且无事件」的容器可以排除,但「running 且有 pending/open
+    事件」的容器必须保留——pending 在恢复时要被静默删除,open 要 resolved;
+    漏盖会让 pending 悬挂成孤儿。
+    """
+    _container_rule(env, sustain=3600)
+    event = env.make_event(
+        metric="container_status",
+        value=1.0,
+        threshold=0.0,
+        severity="critical",
+        resource_type="container",
+        resource_id="cc-pend-01",
+        resource_name=f"{env.device.name}/app-01",
+        status="pending",
+        notification_status="pending",
+    )
+    event_id = event.id
+    container = DeviceContainer(
+        device_id=env.device.id,
+        container_id="cc-pend-01",
+        name="app-01",
+        state="running",
+    )
+    env.db.add(container)
+    env.db.flush()
+    env.extra["containers"].append(container.id)
+    env.db.commit()
+
+    with patch("app.services.alerts._notify_event_in_background"):
+        evaluate_container_alerts()
+
+    env.db.rollback()
+    # 行已被另一会话删除:旧实例属性访问会 ObjectDeletedError,expunge 后用
+    # 不实例化的 count 断「不存在」
+    env.db.expunge(event)
+    assert env.db.query(AlertEvent.id).filter(AlertEvent.id == event_id).count() == 0
+
+
+def test_container_eval_guest_host_path(env):
+    """钉住(收窄前置④):PVE 虚机容器(pve_guest_binding 归属)同样触发,
+    owner_target_id 为合成负数(与主机状态/自动化同一契约)。"""
+    _container_rule(env)
+    conn = PveConnection(
+        name=f"ctr-pve-{env.rule.id}",
+        host="10.8.0.9",
+        token_id="root@pam!t",
+        token_secret_enc="encrypted",
+    )
+    env.db.add(conn)
+    env.db.flush()
+    env.extra["connections"].append(conn.id)
+    binding = PveGuestBinding(
+        connection_id=conn.id,
+        guest_type="qemu",
+        vmid=101,
+        ip_address="10.9.0.101",
+        enabled=1,
+    )
+    env.db.add(binding)
+    env.db.flush()
+    container = DeviceContainer(
+        pve_guest_binding_id=binding.id,
+        container_id="cc-guest-01",
+        name="web-01",
+        state="exited",
+    )
+    env.db.add(container)
+    env.db.commit()
+
+    try:
+        with patch("app.services.alerts._notify_event_in_background"):
+            evaluate_container_alerts()
+
+        env.db.rollback()
+        ev = (
+            env.db.query(AlertEvent)
+            .filter(
+                AlertEvent.rule_id == env.rule.id,
+                AlertEvent.resource_id == "cc-guest-01",
+                AlertEvent.status.in_(("pending", "open")),
+            )
+            .first()
+        )
+        assert ev is not None
+        assert ev.owner_target_id == -(conn.id * 1_000_000 + 101)
+        assert ev.device_id is None
+    finally:
+        env.db.rollback()
+        env.db.query(DeviceContainer).filter(
+            DeviceContainer.id == container.id
+        ).delete()
+        env.db.query(PveGuestBinding).filter(PveGuestBinding.id == binding.id).delete()
+        env.db.commit()
 
 
 def test_sweep_closes_pve_guest_event_when_connection_deleted(env):

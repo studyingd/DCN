@@ -621,3 +621,16 @@ def test_trigger_collection_orchestrates_and_persists():
         retention.assert_called_once()
     finally:
         mc._latest = saved_latest
+
+
+# ── 采集命令的网络口径契约(2026-10-24 修) ──
+
+
+def test_collect_commands_pin_network_scope():
+    """Linux 命令必须带 @@netphys 物理口清单(sysfs);Windows 命令必须过滤
+    Loopback/ISATAP/Teredo 伪接口——命令重写时丢了这两处,网络上下行会回到
+    「bond/bridge 翻倍、回环计入」的旧口径,这里第一时间红。"""
+    assert "@@netphys" in mc._LINUX_CMD
+    assert "/sys/class/net/" in mc._LINUX_CMD
+    assert "Loopback" in mc._WINDOWS_PS
+    assert "ISATAP" in mc._WINDOWS_PS

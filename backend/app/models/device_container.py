@@ -129,6 +129,10 @@ class ContainerAction(Base):
     keep_volumes: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, server_default=None
     )
+    # 操作来源:user(界面手动)/auto_remediation(告警自愈)/agent(Agent 动作)
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="user", server_default="user"
+    )
     created_at: Mapped[datetime | None] = mapped_column(
         UTCDateTime, default=lambda: datetime.now(timezone.utc)
     )

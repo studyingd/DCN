@@ -82,6 +82,27 @@ export function renderMarkdown(md: string): string {
 }
 
 /**
+ * renderMarkdown 的按内容缓存版:同一份 markdown 只 parse/sanitize 一次。
+ * 用于模板 v-html——轮询每轮整体替换 run/job 对象都会触发重渲染,内联调
+ * renderMarkdown 会把整段 parse+sanitize 重跑一遍(报告 3KB+ 时可观,
+ * 抽屉/详情打开动画期间掉帧的帮凶之一)。条目上限防长会话内存无界。
+ */
+const mdCache = new Map<string, string>()
+const MD_CACHE_MAX = 64
+export function renderMarkdownCached(md: string): string {
+  if (!md) return ''
+  const hit = mdCache.get(md)
+  if (hit !== undefined) return hit
+  const html = renderMarkdown(md)
+  if (mdCache.size >= MD_CACHE_MAX) {
+    const oldest = mdCache.keys().next().value
+    if (oldest !== undefined) mdCache.delete(oldest)
+  }
+  mdCache.set(md, html)
+  return html
+}
+
+/**
  * Strip ALL HTML tags from a string. Returns plain text only.
  * Use for display contexts where no markup is expected (e.g., display names, device names).
  */

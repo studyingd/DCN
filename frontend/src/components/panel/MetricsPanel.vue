@@ -4,6 +4,11 @@
       <h2 class="inline-panel-title">服务器监控</h2>
       <div class="metrics-toolbar">
         <span class="metrics-subtitle">Linux 走 SSH · Windows 走 WinRM · 每 30s 自动刷新</span>
+        <el-select v-model="statusFilter" class="metrics-filter status-filter" style="width: 96px">
+          <el-option label="全部" value="" />
+          <el-option label="在线" value="online" />
+          <el-option label="离线" value="offline" />
+        </el-select>
         <el-select v-model="roomFilter" placeholder="全部机房" clearable class="metrics-filter">
           <el-option v-for="r in roomStore.rooms" :key="r.id" :label="r.name" :value="r.id" />
         </el-select>
@@ -23,7 +28,7 @@
         row-key="device_id"
         stripe
         class="metrics-table"
-        :default-sort="{ prop: 'cpu_pct', order: 'descending' }"
+        :row-class-name="rowClassName"
         @row-click="openDetail"
       >
         <el-table-column label="状态" width="80" align="center">
@@ -107,11 +112,11 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="采集时间" width="95" align="right">
+        <el-table-column label="采集时间" width="130" align="right">
           <template #default="{ row }">
             <span class="fetched-text" :class="{ 'is-stale': isStale(row.fetched_at) }">
               {{ fmtClock(row.fetched_at) }}
-              <small v-if="isStale(row.fetched_at)">过期</small>
+              <small v-if="isStale(row.fetched_at)">过期 {{ staleFor(row.fetched_at) }}</small>
             </span>
           </template>
         </el-table-column>
@@ -212,6 +217,7 @@
 import { computed, defineComponent, h, onMounted, onUnmounted, ref, watch, type PropType } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElProgress } from 'element-plus'
+import { usePolling } from '@/composables/usePolling'
 // ElProgress 在 script 里局部导入并经 h() 渲染，模板中的 <el-progress> 会优先绑定到该
 // 局部变量，unplugin-vue-components 因此不会自动注入它的样式；进度条样式是否生效就会
 // 取决于其它异步面板有没有顺带加载过这份 CSS（表现为刷新后样式不一致）。这里显式引入。
@@ -265,10 +271,10 @@ const items = ref<MetricsDeviceItem[]>([])
 const loading = ref(false)
 const pollError = ref('')
 const keyword = ref('')
+const statusFilter = ref<'' | 'online' | 'offline'>('')
 const roomStore = useRoomStore()
 const roomFilter = ref<number | null>(null)
 const rackFilter = ref<number | null>(null)
-let timer: number | undefined
 let inFlight = false
 
 // 从 U 位图详情面板跳入(?panel=metrics&device=13):首载后自动打开该设备抽屉
@@ -322,16 +328,26 @@ async function load(manual = false) {
   }
 }
 
+// 30s 轮询统一走 usePolling(2026-10-31 收编):页面隐藏不发请求、恢复可见
+// 立即补一轮;load 内部自带 try/catch(pollError 横幅),轮询链不会中断
+const { start: startPolling, stop: stopPolling } = usePolling(() => load(), {
+  intervalMs: 30_000,
+})
+
 onMounted(() => {
   load()
-  timer = window.setInterval(() => {
-    if (!document.hidden) void load()
-  }, 30000)
+  startPolling()
 })
-onUnmounted(() => window.clearInterval(timer))
+onUnmounted(stopPolling)
 
 const filteredItems = computed(() => {
   let list = items.value
+  if (statusFilter.value) {
+    // 离线 = 探活离线,或在线但采集持续失败(WinRM 不可达等同离线观察)
+    list = list.filter((i) =>
+      statusFilter.value === 'online' ? isRowOnline(i) && i.available : !isRowOnline(i) || !i.available,
+    )
+  }
   if (roomFilter.value) {
     list = list.filter((i) => i.room_id === roomFilter.value)
   }
@@ -339,9 +355,29 @@ const filteredItems = computed(() => {
     list = list.filter((i) => i.rack_id === rackFilter.value)
   }
   const q = keyword.value.trim().toLowerCase()
-  if (!q) return list
-  return list.filter((i) => i.device_name.toLowerCase().includes(q) || (i.ip_address || '').toLowerCase().includes(q))
+  if (q) {
+    list = list.filter((i) => i.device_name.toLowerCase().includes(q) || (i.ip_address || '').toLowerCase().includes(q))
+  }
+  // 默认两级排序(2026-10-31 用户拍板):离线垫底(掉线设备不淹没在线设备),
+  // 组内按内存使用率降序——默认看内存压力最大的机器。此前 default-sort
+  // cpu_pct 会在挂载时覆盖这里的排序(既有 bug,已随本改动一并移除);
+  // 用户点列头排序后由 el-table 接管,轮询刷新不重置选择。
+  return [...list].sort(
+    (a, b) => Number(isRowOffline(a)) - Number(isRowOffline(b)) || (b.mem_pct ?? -1) - (a.mem_pct ?? -1),
+  )
 })
+
+function isRowOnline(row: MetricsDeviceItem): boolean {
+  return (row.status || '').toLowerCase() === 'online'
+}
+
+function isRowOffline(row: MetricsDeviceItem): boolean {
+  return !isRowOnline(row) || !row.available
+}
+
+function rowClassName({ row }: { row: MetricsDeviceItem }): string {
+  return isRowOffline(row) ? 'row-offline' : ''
+}
 
 function sortVal(key: 'cpu_pct' | 'mem_pct' | 'disk_max_pct') {
   return (row: MetricsDeviceItem) => row[key] ?? -1
@@ -357,11 +393,22 @@ function statusDotClass(row: MetricsDeviceItem): string {
 function statusText(row: MetricsDeviceItem): string {
   const s = (row.status || '').toLowerCase()
   if (s === 'online') return row.available ? '在线' : `在线,但采集失败:${row.error || '未知原因'}`
-  if (s === 'offline') return '离线'
+  if (s === 'offline')
+    return row.fetched_at ? `离线(最后采集 ${staleFor(row.fetched_at)}前;点击行可看宕机前历史曲线)` : '离线(无采集数据)'
   return '离线'
 }
 function isStale(ts: string | null, maxAgeSeconds = 120): boolean {
   return !!ts && Date.now() - new Date(ts).getTime() > maxAgeSeconds * 1000
+}
+function staleFor(ts: string | null): string {
+  if (!ts) return '-'
+  const sec = Math.max(0, Math.floor((Date.now() - new Date(ts).getTime()) / 1000))
+  if (sec < 60) return `${sec}s`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min}m`
+  const h = Math.floor(min / 60)
+  if (h < 24) return `${h}h`
+  return `${Math.floor(h / 24)}d`
 }
 
 // ── 详情抽屉 ──
@@ -527,6 +574,10 @@ const ioChartOption = computed(() => {
   box-shadow: 0 0 6px rgba(217, 119, 6, 0.45);
 }
 
+/* 离线/采集失败行整体降透明度:仍在列表(可点进历史曲线),但不淹没在线设备 */
+:deep(.el-table .row-offline) {
+  opacity: 0.55;
+}
 .dot-offline {
   background: var(--dcn-danger);
 }

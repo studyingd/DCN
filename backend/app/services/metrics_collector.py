@@ -58,7 +58,7 @@ _ssh_pool = SshPool(
     max_size=METRICS_SSH_POOL_SIZE,
 )
 
-# 每台设备最新一行样本(限 _FALLBACK_MAX_AGE_SECONDS 内),DB 回退读取的数据源。
+# 每台设备最新一行样本(不限年龄——超龄=最后在线快照),DB 回退读取的数据源。
 _LATEST_SAMPLE_QUERY = (
     select(DeviceMetricSample)
     .where(
@@ -83,6 +83,10 @@ _LINUX_CMD = (
     "echo '@@load'; cat /proc/loadavg; "
     "echo '@@uptime'; cat /proc/uptime; "
     "echo '@@net'; cat /proc/net/dev; "
+    # 物理网卡清单(sysfs):带 /sys/class/net/<if>/device 链接的才是硬件口,
+    # bond/bridge/veth/tap/vlan 等虚拟口没有。求和只认物理口——同一笔流量会
+    # 同时出现在「bond0+成员物理口」「网桥+桥内物理口」上,全加会翻倍。
+    'echo \'@@netphys\'; for n in /sys/class/net/*; do [ -e "$n/device" ] && basename "$n"; done; '
     # 读 PRETTY_NAME 用于 OS 自愈回写(对齐 Windows 的 Caption 行为)。
     # 取 .DEFAULT 兼容 systemd,缺失时回退到 /etc/os-release 本身。
     "echo '@@osrel'; grep -E '^PRETTY_NAME=' /etc/os-release 2>/dev/null"
@@ -102,7 +106,11 @@ Write-Output "caption=$($os.Caption)"
 Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object {
   Write-Output "disk=$($_.DeviceID),$($_.Size),$($_.Size-$_.FreeSpace)"
 }
-Get-CimInstance Win32_PerfFormattedData_Tcpip_NetworkInterface | ForEach-Object {
+# 回环/隧道伪接口不计入:PerfFormattedData 会带「MS TCP Loopback Interface」
+# 等伪接口,本机 localhost 流量(应用连本机 DB/Redis)不是网卡收发——与
+# Linux 侧跳过 lo 的口径对齐。
+Get-CimInstance Win32_PerfFormattedData_Tcpip_NetworkInterface |
+  Where-Object {$_.Name -notmatch 'Loopback|ISATAP|Teredo'} | ForEach-Object {
   $n = $_.Name -replace ',',' '
   Write-Output "netif=$n,$($_.BytesReceivedPersec),$($_.BytesSentPersec)"
 }
@@ -138,7 +146,8 @@ _fallback_loaded_at = 0.0
 def _fallback_from_db() -> dict[int, dict]:
     """从 device_metric_samples 读每台设备最新一行,映射成 _latest 条目形状。
 
-    纳管设备里「绑了凭据但最近无新鲜样本」的行也补一条 available=False 的
+    纳管设备里「绑了凭据但从无样本行」的(2026-10-31 前:超龄也算,现在超龄
+    保留为最后在线快照)补一条 available=False 的
     合成条目:非 leader 进程(或采集刚停摆)时,列表页的剔除规则靠 available
     标志工作,缺条目会退化成「还没采集过,给一次机会」——失败设备以含糊的
     「不可用」挂在列表里,而不是带明确原因或被剔除。合成 error 文案说明
@@ -164,11 +173,14 @@ def _fallback_from_db() -> dict[int, dict]:
         return {}
     finally:
         db.close()
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=_FALLBACK_MAX_AGE_SECONDS)
     out: dict[int, dict] = {}
     for row in rows:
-        if row.ts is None or row.ts < cutoff:
-            continue  # 最新样本已超龄(采集停摆),不算"有数据"
+        if row.ts is None:
+            continue
+        # 超龄样本不再丢弃(2026-10-31 用户拍板):每台设备的最新一行就是
+        # 「最后在线快照」——设备宕机/采集停摆后,列表页靠它展示最后已知
+        # 指标与最后采集时间(前端用过期徽标表达陈旧度),而不是整体消失。
+        # 历史样本本身受 METRICS_RETENTION_DAYS 保留期约束,最旧不过 N 天。
         did = int(row.device_id)
         out[did] = {
             "device_id": did,

@@ -1,3 +1,4 @@
+import math
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -199,7 +200,7 @@ def login(
             )
             if locked_until is not None and locked_until > now:
                 remaining_sec = (locked_until - now).total_seconds()
-                remaining_min = max(1, int(remaining_sec / 60))
+                remaining_min = max(1, math.ceil(remaining_sec / 60))
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail=f"账户已被锁定，请在 {remaining_min} 分钟后重试",
@@ -208,7 +209,10 @@ def login(
             if count >= MAX_FAILED_ATTEMPTS:
                 _shadow_locks[key] = (
                     count,
-                    now + timedelta(minutes=LOCKOUT_DURATION_MINUTES),
+                    # 整秒截断,与真实账户的 DB 锁定写入精度对齐(见锁定分支注释)
+                    (now + timedelta(minutes=LOCKOUT_DURATION_MINUTES)).replace(
+                        microsecond=0
+                    ),
                     now,
                 )
                 raise HTTPException(
@@ -227,7 +231,7 @@ def login(
         remaining_sec = (
             (locked_until or datetime.now(timezone.utc)) - datetime.now(timezone.utc)
         ).total_seconds()
-        remaining_min = max(1, int(remaining_sec / 60))
+        remaining_min = max(1, math.ceil(remaining_sec / 60))
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"账户已被锁定，请在 {remaining_min} 分钟后重试",
@@ -237,9 +241,12 @@ def login(
     if not verify_password(body.password, user.password):
         user.failed_login_attempts += 1
         if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
-            user.locked_until = datetime.now(timezone.utc) + timedelta(
-                minutes=LOCKOUT_DURATION_MINUTES
-            )
+            # 整秒截断,与影子锁的内存精度对齐:DB DATETIME 秒级存储会把带小数的
+            # 到期时间四舍五入,两条路径相差亚秒级会让「剩余分钟」渲染差 1,被
+            # 用来区分真实/不存在用户名(枚举)。测试:security_hardening 锁定用例。
+            user.locked_until = (
+                datetime.now(timezone.utc) + timedelta(minutes=LOCKOUT_DURATION_MINUTES)
+            ).replace(microsecond=0)
             db.commit()
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,

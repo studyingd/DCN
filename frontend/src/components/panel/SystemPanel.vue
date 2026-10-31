@@ -60,7 +60,7 @@ import { userAPI, roleAPI, agentAPI, webhookAPI } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import UserManagePanel from './UserManagePanel.vue'
 import AgentConfigPanel from './AgentConfigPanel.vue'
-import WebhookSettingsPanel from './WebhookSettingsPanel.vue'
+import WebhookSettingsPanel from './webhook/WebhookSettingsPanel.vue'
 const props = withDefaults(defineProps<{ initialUsersTab?: string; tab?: string }>(), {
   initialUsersTab: 'users',
   tab: 'overview',

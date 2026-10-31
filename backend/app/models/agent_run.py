@@ -26,6 +26,10 @@ class AgentRun(Base):
     status: Mapped[str] = mapped_column(
         String(32), default="running"
     )  # running/completed/failed
+    # 动作模式:readonly=仅读工具;standard=L1 自动+L2 审批;strict=写动作全审批
+    mode: Mapped[str] = mapped_column(
+        String(16), default="readonly", server_default="readonly"
+    )
     steps_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     report: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

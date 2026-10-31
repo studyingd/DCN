@@ -1,0 +1,146 @@
+/* ============================================================
+   自动化运维分区组件共享样式(全局类,atm- 前缀防跨面板泄漏)。
+   各 section 组件在 <script setup> 里 import './automation.css';
+   只放跨组件复用的卡片/类型卡/预设行等模式,单组件私有的样式仍写 scoped。
+   ============================================================ */
+
+/* ── 卡片容器 ── */
+.atm-card {
+  border: 1px solid var(--dcn-border-light);
+  border-radius: var(--dcn-radius-lg);
+  background: var(--dcn-bg-section);
+  box-shadow: var(--dcn-shadow-sm);
+  padding: 18px;
+}
+.atm-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.atm-card-heading > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.atm-card-heading small {
+  color: var(--dcn-text-secondary);
+  font-size: 12px;
+}
+
+/* ── 类型选择卡(概览「开始一次运维任务」与创建向导第 1 步共用) ── */
+.atm-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.atm-type-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 82px;
+  padding: 14px;
+  border: 1px solid var(--dcn-border-light);
+  border-radius: var(--dcn-radius-md);
+  background: var(--dcn-bg-card);
+  color: var(--dcn-text-primary);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.atm-type-card:hover,
+.atm-type-card.selected {
+  border-color: var(--dcn-primary);
+  background: var(--dcn-primary-soft);
+}
+.atm-type-icon {
+  width: 42px;
+  height: 42px;
+  font-size: 20px;
+}
+.atm-type-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.atm-type-copy small {
+  color: var(--dcn-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* ── 图标底色(概览统计卡 / 类型卡 / 列表行内小图标共用) ── */
+.atm-icon-box {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: var(--dcn-radius-md);
+}
+.atm-icon--primary {
+  color: var(--dcn-primary);
+  background: var(--dcn-primary-soft);
+}
+.atm-icon--success {
+  color: var(--dcn-success);
+  background: color-mix(in srgb, var(--dcn-success) 12%, transparent);
+}
+.atm-icon--warning {
+  color: var(--dcn-warning);
+  background: color-mix(in srgb, var(--dcn-warning) 12%, transparent);
+}
+.atm-icon--danger {
+  color: var(--dcn-danger);
+  background: color-mix(in srgb, var(--dcn-danger) 12%, transparent);
+}
+
+/* ── 列表行内的小类型图标(最近任务/执行记录) ── */
+.atm-job-type-icon {
+  width: 34px;
+  height: 34px;
+}
+
+/* ── 预设问题/命令快捷按钮 ── */
+.atm-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -4px 0 20px;
+}
+.atm-preset-row button {
+  padding: 7px 10px;
+  border: 1px solid var(--dcn-border-light);
+  border-radius: var(--dcn-radius-sm);
+  background: var(--dcn-bg-card);
+  color: var(--dcn-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.atm-preset-row button:hover {
+  color: var(--dcn-primary);
+  border-color: var(--dcn-primary);
+}
+
+/* ── 表单提示/工具栏 ── */
+.atm-field-hint {
+  color: var(--dcn-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.atm-toolbar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.atm-toolbar .el-select {
+  width: 150px;
+}
+
+@media (max-width: 760px) {
+  .atm-type-grid {
+    grid-template-columns: 1fr;
+  }
+}

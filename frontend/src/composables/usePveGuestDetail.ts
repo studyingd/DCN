@@ -14,6 +14,7 @@
  */
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, type Ref } from 'vue'
+import { usePolling } from '@/composables/usePolling'
 
 import { pveAPI } from '@/api'
 import type { PveGuest, PveGuestBinding, PveRrdPoint, PveSnapshot } from '@/types/pve'
@@ -52,7 +53,17 @@ export function usePveGuestDetail(
   const historyError = ref('')
   let historyRequest = 0
   let detailLoadTimer: number | undefined
-  let detailPollTimer: number | undefined
+  // 30s 详情轮询统一走 usePolling(2026-10-31 收编):页面隐藏不发请求,
+  // 恢复可见立即补一轮;绑定弹窗打开时暂停
+  const { start: startDetailPoll, stop: stopDetailPoll } = usePolling(
+    () => {
+      if (detailVisible.value && !bindingVisible.value) {
+        return refreshDetail(false).catch(() => {})
+      }
+      return undefined
+    },
+    { intervalMs: 30_000 },
+  )
   let detailRefreshInFlight = false
   let detailRefreshQueued = false
   // 后端补探精确 OS 名(_maybe_backfill_os_name)是后台线程,延迟重拉显示结果
@@ -95,12 +106,8 @@ export function usePveGuestDetail(
     snapName.value = ''
     guestBinding.value = null
     void refreshDetail()
-    if (detailPollTimer) window.clearInterval(detailPollTimer)
-    detailPollTimer = window.setInterval(() => {
-      if (!document.hidden && detailVisible.value && !bindingVisible.value) {
-        void refreshDetail(false)
-      }
-    }, 30000)
+    stopDetailPoll()
+    startDetailPoll()
     bindingReloadTries = 0
     // 先加载运维绑定，让配置入口尽快可用；历史和快照放到下一帧后后台加载。
     void loadGuestBinding()
@@ -127,8 +134,7 @@ export function usePveGuestDetail(
     detailLoadTimer = undefined
     if (bindingReloadTimer) window.clearTimeout(bindingReloadTimer)
     bindingReloadTimer = undefined
-    if (detailPollTimer) window.clearInterval(detailPollTimer)
-    detailPollTimer = undefined
+    stopDetailPoll()
     detailRefreshQueued = false
     // 使尚未返回的历史请求失效，避免关闭详情后又触发无意义的响应式更新。
     historyRequest += 1
@@ -137,7 +143,7 @@ export function usePveGuestDetail(
   /** 组件卸载时的兜底清理（onUnmounted 调用）。 */
   function dispose() {
     if (detailLoadTimer) window.clearTimeout(detailLoadTimer)
-    if (detailPollTimer) window.clearInterval(detailPollTimer)
+    stopDetailPoll()
   }
 
   async function loadGuestBinding() {

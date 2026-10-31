@@ -354,6 +354,7 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
+import { usePolling } from '@/composables/usePolling'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, WarningFilled, Connection, Document, Monitor, ArrowRight } from '@element-plus/icons-vue'
 import { containersAPI } from '@/api'
@@ -385,7 +386,7 @@ const lastLoaded = ref<string | null>(null)
 const actingKey = ref<string | null>(null)
 const pollError = ref('')
 
-let pollTimer: number | undefined
+// (pollTimer 声明已随 usePolling 收编删除,2026-10-31)
 const pendingTimers: number[] = []
 let loadInFlight = false
 
@@ -549,19 +550,22 @@ function filterContainers(containers: ContainerItem[]): ContainerItem[] {
   if (q) {
     list = list.filter((c) => c.name.toLowerCase().includes(q) || (c.image || '').toLowerCase().includes(q))
   }
-  return list
+  // 容器卡内默认按内存使用率降序(2026-10-31 用户拍板,与服务器监控/PVE 同口径);
+  // 非运行态容器 mem 为空 → 自然沉底
+  return [...list].sort((a, b) => (b.mem_pct ?? -1) - (a.mem_pct ?? -1))
 }
+
+// 20s 列表轮询统一走 usePolling(2026-10-31 收编);quiet=true 不弹 loading
+const { start: startPolling, stop: stopPolling } = usePolling(() => load(true).catch(() => {}), { intervalMs: 20_000 })
 
 onMounted(() => {
   void load(false)
-  pollTimer = window.setInterval(() => {
-    if (!document.hidden) void load(true)
-  }, 20000)
+  startPolling()
 })
 
 onUnmounted(() => {
-  window.clearInterval(pollTimer)
-  window.clearInterval(logsTimer)
+  stopPolling()
+  stopLogsPolling()
   // 组件卸载后,setTimeout 排队的 load() 仍会命中已卸载组件,全部清掉。
   pendingTimers.forEach((t) => window.clearTimeout(t))
   pendingTimers.length = 0
@@ -684,7 +688,6 @@ const logsTail = ref(100)
 const logsFilter = ref('')
 // 默认打开自动刷新：日志弹窗最常见的用途就是盯着实时输出。
 const logsAuto = ref(true)
-let logsTimer: number | undefined
 
 // 静默(自动刷新)失败不打断阅读,但必须留痕:否则排障时盯着的是过期输出而不自知
 const logsStaleAt = ref<string | null>(null)
@@ -729,20 +732,19 @@ function openLogs(e: DeviceContainersEntry, c: ContainerItem) {
   fetchLogs()
 }
 
+// 日志 5s 自动刷新统一走 usePolling(2026-10-31 收编):页面隐藏时暂停
+// 拉取(避免后台 SSH/WinRM 连接白烧),恢复可见立即补一轮
+const { start: startLogsPolling, stop: stopLogsPolling } = usePolling(() => fetchLogs(true).catch(() => {}), {
+  intervalMs: 5_000,
+})
+
 function onLogsDialogClose() {
-  window.clearInterval(logsTimer)
-  logsTimer = undefined
+  stopLogsPolling()
 }
 
 watch([logsAuto, logsVisible], ([auto, vis]) => {
-  window.clearInterval(logsTimer)
-  logsTimer = undefined
-  if (auto && vis) {
-    logsTimer = window.setInterval(() => {
-      // 页面切到后台时暂停拉取，避免无意义的 SSH/WinRM 往返。
-      if (!document.hidden) void fetchLogs(true)
-    }, 5000)
-  }
+  if (auto && vis) startLogsPolling()
+  else stopLogsPolling()
 })
 
 async function copyLogs() {

@@ -1,17 +1,11 @@
 """Threshold evaluation and Webhook delivery for metric alerts."""
 
 import asyncio
-import base64
-import hashlib
-import hmac
-import json
 import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -31,12 +25,35 @@ from app.models.pve_connection import PveConnection
 from app.models.pve_guest_binding import PveGuestBinding
 from app.models.service_interface import InterfaceProbe, ServiceInterface
 from app.models.webhook import Webhook
-from app.services import feishu
+
+# 拆分 re-export(2026-10-31 Phase-1):patch seam 保持 alerts 命名空间可达,
+# 调用方留在门面;详见 alert_delivery.py / alert_guest_ip.py 模块头注释。
+from app.services.alert_delivery import (  # noqa: F401
+    SEVERITY_LABELS,
+    _deliver_feishu_app,
+    _deliver_one,
+    _feishu_workflow_body,
+    _NoRedirect,
+    _webhook_body,
+    _webhook_opener,
+)
+from app.services.alert_guest_ip import (  # noqa: F401
+    _QGA_IP_TTL,
+    _event_guest_key,
+    _guest_binding_ip,
+    _guest_binding_ips,
+    _guest_display_ip,
+    _guest_qga_ip,
+    _int_or_none,
+    _qga_ip_cache,
+    _qga_ip_cache_lock,
+)
 from app.services.containers_collector import decode_pve_target_id
-from app.services.crypto import decrypt
-from app.services.feishu import FeishuError
 from app.services.monitor import get_latest_statuses
-from app.services.pve import build_client, guest_agent_summary
+from app.services.pve import (  # noqa: F401 — 测试 patch seam(alerts.build_client/alerts.guest_agent_summary),勿删
+    build_client,
+    guest_agent_summary,
+)
 from app.services.pve_guest_status import (
     get_connection_state,
     get_guests_by_connection,
@@ -56,8 +73,6 @@ from app.services.remediation import (
     submit_remediation,
     sweep_expired_notification_holds,
 )
-from app.utils import format_local_time
-from app.validators import validate_outbound_url
 
 # 归因类里连 alert.resolved 也不推的指标(2026-09-16 用户定调:触发卡已带
 # 归因,恢复卡只是重铺同样的详情+结论)。container_status 例外(2026-09-17
@@ -70,14 +85,6 @@ logger = logging.getLogger(__name__)
 _notification_pool = ThreadPoolExecutor(
     max_workers=8, thread_name_prefix="alert-webhook"
 )
-
-
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_webhook_opener = build_opener(_NoRedirect)
 
 METRIC_LABELS = {
     "cpu_pct": "CPU 使用率",
@@ -93,7 +100,6 @@ METRIC_LABELS = {
     # 从未有评估器发射(死配置,2026-09-17 清理);business_status 是唯一
     # 真实存在的业务指标,evaluate_business_alerts 每轮发射。
 }
-SEVERITY_LABELS = {"info": "信息", "warning": "警告", "critical": "严重"}
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -103,56 +109,6 @@ def _as_utc(value: datetime) -> datetime:
 def _utc_iso(value: datetime | None) -> str | None:
     """出站 payload 里的时间必须带时区，否则接收方会按自己的本地时间误读。"""
     return None if value is None else _as_utc(value).isoformat()
-
-
-def _feishu_workflow_body(payload: dict) -> bytes:
-    """Minimal Request Body for a Feishu Workflow webhook."""
-    alert = payload["alert"]
-    device = payload["device"]
-    body = {
-        "device_name": device.get("name", ""),
-        "device_ip": device.get("ip_address") or "",
-        "severity": SEVERITY_LABELS.get(
-            alert.get("severity"), alert.get("severity", "警告")
-        ),
-        "alert_time": format_local_time(
-            alert.get("last_seen_at") or payload.get("timestamp", "")
-        ),
-        "alert_content": alert.get("message", ""),
-    }
-    return json.dumps(body, ensure_ascii=False).encode("utf-8")
-
-
-def _webhook_body(webhook: Webhook, payload: dict) -> bytes:
-    """Adapt the canonical alert payload to the selected webhook provider."""
-    # 飞书工作流 Webhook 接收自定义 Request Body，应直接发送完整的
-    # DCN 告警业务 JSON，便于工作流映射到多维表格字段。
-    if webhook.provider == "feishu":
-        return _feishu_workflow_body(payload)
-    # 可选的飞书群自定义机器人格式（不用于多维表格工作流）。
-    if webhook.provider == "feishu_bot":
-        timestamp = str(int(time.time()))
-        secret = decrypt(webhook.secret_enc or "")
-        body = {
-            "msg_type": "text",
-            "content": {
-                "text": (
-                    f"[{payload['alert']['severity'].upper()}] DCN 告警\n"
-                    f"规则：{payload['alert']['rule_name']}\n"
-                    f"设备：{payload['device']['name']} ({payload['device'].get('ip_address') or '-'})\n"
-                    f"内容：{payload['alert']['message']}\n"
-                    f"事件：{payload['event']}"
-                )
-            },
-        }
-        if secret:
-            signing = f"{timestamp}\n{secret}".encode("utf-8")
-            body["timestamp"] = timestamp
-            body["sign"] = base64.b64encode(
-                hmac.new(secret.encode("utf-8"), signing, hashlib.sha256).digest()
-            ).decode("utf-8")
-        return json.dumps(body, ensure_ascii=False).encode("utf-8")
-    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
 def _matches(rule: AlertRule, value: float) -> bool:
@@ -265,250 +221,6 @@ def _payload(
         }
     )
     return payload
-
-
-def _deliver_feishu_app(webhook: Webhook, payload: dict) -> dict:
-    """飞书自建应用:直接私聊/群发给配置的 receive_id，不经过多维表格工作流。
-
-    url 存的是开放平台域名(默认 https://open.feishu.cn)，app_secret 复用
-    secret_enc;接收人与样式放在 webhooks.config 里。
-    """
-    config = webhook.config or {}
-    started = time.monotonic()
-    base_result = {"webhook_id": webhook.id, "name": webhook.name}
-    try:
-        result = feishu.deliver(
-            payload,
-            base=webhook.url,
-            app_id=config.get("app_id"),
-            app_secret=decrypt(webhook.secret_enc or ""),
-            receivers=config.get("receivers"),
-            receive_id_type=config.get("receive_id_type")
-            or feishu.AUTO_RECEIVE_ID_TYPE,
-            style=config.get("style", "card"),
-        )
-    except (FeishuError, ValueError) as exc:
-        status = exc.status if isinstance(exc, FeishuError) else None
-        return {
-            **base_result,
-            "ok": False,
-            "status_code": status,
-            "error": str(exc)[:200],
-            "duration_ms": int((time.monotonic() - started) * 1000),
-        }
-    return {
-        **base_result,
-        "ok": bool(result["ok"]),
-        "status_code": result["status_code"],
-        "error": result.get("error"),
-        "duration_ms": int((time.monotonic() - started) * 1000),
-        "receivers": result.get("receivers"),
-        "delivered": result.get("delivered"),
-    }
-
-
-def _deliver_one(webhook: Webhook, payload: dict) -> dict:
-    if webhook.provider == "feishu_app":
-        return _deliver_feishu_app(webhook, payload)
-    headers = {"Content-Type": "application/json", "User-Agent": "DCN-Alert/1.0"}
-    headers.update(webhook.headers or {})
-    secret = decrypt(webhook.secret_enc or "")
-    if secret:
-        headers.setdefault("X-Webhook-Secret", secret)
-    request = Request(
-        webhook.url,
-        data=_webhook_body(webhook, payload),
-        headers=headers,
-        method="POST",
-    )
-    started = time.monotonic()
-    try:
-        validate_outbound_url(webhook.url)
-        with _webhook_opener.open(request, timeout=8) as response:
-            status = response.status
-            return {
-                "webhook_id": webhook.id,
-                "name": webhook.name,
-                "ok": 200 <= status < 300,
-                "status_code": status,
-                "duration_ms": int((time.monotonic() - started) * 1000),
-            }
-    except HTTPError as exc:
-        return {
-            "webhook_id": webhook.id,
-            "name": webhook.name,
-            "ok": False,
-            "status_code": exc.code,
-            "error": f"HTTP {exc.code}",
-            "duration_ms": int((time.monotonic() - started) * 1000),
-        }
-    except (URLError, TimeoutError, OSError) as exc:
-        return {
-            "webhook_id": webhook.id,
-            "name": webhook.name,
-            "ok": False,
-            "status_code": None,
-            "error": str(exc)[:200],
-            "duration_ms": int((time.monotonic() - started) * 1000),
-        }
-
-
-def _event_guest_key(event: AlertEvent) -> tuple[int, int] | None:
-    """虚拟机事件 → (connection_id, vmid);物理设备/无法定位返回 None。
-
-    宿主身份:device_id(设备正 id 直接判否) > 处置记录 target_id(容器/虚拟机
-    事件写入) > resource_id 负数编码(虚拟机指标事件)。
-    """
-    owner = event.device_id
-    if owner is None:
-        owner = _int_or_none((event.remediation_json or {}).get("target_id"))
-    if owner is not None and owner > 0:
-        return None
-    decoded = (
-        decode_pve_target_id(owner)
-        if owner is not None
-        else decode_pve_target_id(_int_or_none(event.resource_id))
-    )
-    return decoded or None
-
-
-def _guest_binding_ips(db: Session, events: list[AlertEvent]) -> dict[int, str]:
-    """批量解析虚拟机事件的运维接入 IP(绑定保存时 QGA 地址优先,见 routers/pve.py),
-    键为 event.id。列表接口一次取回,避免逐行反查绑定。
-
-    告警卡片/告警中心的「地址」字段对虚拟机曾是 '-':事件 device_id 为 NULL,
-    链路只查 devices 表。这里按宿主身份反查运维绑定,拿到就显示;无绑定的
-    QGA-only 虚机回退「最近已知 IP」(leader 进程的 IP 刷新循环维护,
-    列表接口在非 leader 实例上拿不到属预期,与磁盘值缺失同口径)。
-    """
-    from app.services.pve_guest_status import get_last_known_ip
-
-    wanted: dict[tuple[int, int], set[int]] = {}
-    for event in events:
-        key = _event_guest_key(event)
-        if key is None:
-            continue
-        wanted.setdefault(key, set()).add(event.id)
-    if not wanted:
-        return {}
-    conn_ids = {key[0] for key in wanted}
-    bindings = (
-        db.query(PveGuestBinding)
-        .filter(
-            PveGuestBinding.connection_id.in_(conn_ids),
-            PveGuestBinding.enabled == 1,
-        )
-        .all()
-    )
-    lookup = {(b.connection_id, b.vmid): (b.ip_address or None) for b in bindings}
-    out: dict[int, str] = {}
-    for key, event_ids in wanted.items():
-        # 绑定 IP(持久) > 最近已知 IP(QGA 运行期问到的,停机后仍可显示)
-        ip = lookup.get(key) or get_last_known_ip(key[0], key[1])
-        if not ip:
-            continue
-        for event_id in event_ids:
-            out[event_id] = ip
-    return out
-
-
-# QGA 地址查询结果缓存(评估话术与通知共用):QGA ping 每次最多 ~4s,
-# 30s 评估周期逐轮重查会把评估拖慢,这里 TTL 5 分钟内复用。
-_qga_ip_cache: dict[tuple[int, int], tuple[str | None, float]] = {}
-_qga_ip_cache_lock = threading.Lock()
-_QGA_IP_TTL = 300.0
-
-
-def _guest_qga_ip(db: Session, connection_id: int, vmid: int) -> str | None:
-    """无运维绑定时兜底:QGA 实时地址(仅通知/详情单条路径,允许秒级开销)。
-
-    QGA-only 虚机(装了 Guest Agent 但没配运维接入)在绑定表里没有行,
-    「地址」字段曾是 '-'。这里按快照里的 node/guest_type 调一次
-    guest_agent_summary(内部每个 agent 命令 4s 超时),拿 qga_ip_address。
-    guest 停机时 QGA 必然无应答(主机状态告警恰恰在这个时点触发),
-    此时回退到「最近已知 IP」——guest 运行期间由 IP 刷新循环
-    (run_pve_guest_ip_refresh_loop)记下的地址,地址列不至于退回 '-'。
-    """
-    from app.services.pve_guest_status import (
-        get_guest_snapshot,
-        get_last_known_ip,
-        record_guest_ip,
-    )
-
-    conn = (
-        db.query(PveConnection)
-        .filter(PveConnection.id == connection_id, PveConnection.enabled == 1)
-        .first()
-    )
-    if conn is None:
-        return get_last_known_ip(connection_id, vmid)
-    now = time.monotonic()
-    with _qga_ip_cache_lock:
-        cached = _qga_ip_cache.get((connection_id, vmid))
-        if cached and now - cached[1] < _QGA_IP_TTL:
-            return cached[0] or get_last_known_ip(connection_id, vmid)
-    guest = get_guest_snapshot(connection_id, vmid) or {}
-    node = guest.get("node")
-    gtype = guest.get("guest_type") or "qemu"
-    result: str | None = None
-    try:
-        client = build_client(conn)
-        if not node:
-            raw = next(
-                (
-                    g
-                    for g in client.list_guest_resources()
-                    if int(g.get("vmid", -1)) == vmid
-                ),
-                None,
-            )
-            if raw is None:
-                result = None
-            else:
-                node = str(raw.get("node") or "")
-                gtype = str(raw.get("type") or "qemu")
-        if node:
-            summary = guest_agent_summary(client, str(node), gtype, vmid)
-            if summary.get("qga_available"):
-                result = summary.get("qga_ip_address")
-    except Exception:
-        logger.debug("QGA fallback ip lookup failed for %s/%s", connection_id, vmid)
-    with _qga_ip_cache_lock:
-        _qga_ip_cache[(connection_id, vmid)] = (result, time.monotonic())
-    if result:
-        # 运行中问到的实时地址顺手记入「最近已知」,停机后同一地址继续可显示
-        record_guest_ip(connection_id, vmid, result)
-        return result
-    return get_last_known_ip(connection_id, vmid)
-
-
-def _guest_display_ip(db: Session, connection_id: int, vmid: int) -> str | None:
-    """虚机显示 IP:运维接入绑定优先,QGA 实时地址兜底(带 5 分钟缓存),
-    最后回退最近已知 IP(停机期间地址列仍有内容)。
-    评估话术与告警地址字段共用同一来源,口径一致。"""
-    binding = (
-        db.query(PveGuestBinding)
-        .filter(
-            PveGuestBinding.connection_id == connection_id,
-            PveGuestBinding.vmid == vmid,
-            PveGuestBinding.enabled == 1,
-        )
-        .first()
-    )
-    if binding and binding.ip_address:
-        return binding.ip_address
-    return _guest_qga_ip(db, connection_id, vmid)
-
-
-def _guest_binding_ip(db: Session, event: AlertEvent) -> str | None:
-    """单个事件的地址:运维接入 IP 优先,QGA 实时地址兜底(单条路径用)。"""
-    ip = _guest_binding_ips(db, [event]).get(event.id)
-    if ip:
-        return ip
-    key = _event_guest_key(event)
-    if key is None:
-        return None
-    return _guest_qga_ip(db, key[0], key[1])
 
 
 def _notify(
@@ -1361,9 +1073,35 @@ def _container_resource(
 def evaluate_container_alerts() -> None:
     db = SessionLocal()
     try:
+        # 两集合收窄(2026-10-31 P2,前置四条测试已钉):非 running ∪ 存在
+        # pending/open container_status 事件的容器。三大陷阱(AGENTS.md):
+        # ① 只收窄非 running 会漏恢复——回 running 那轮必须进 resources 才能
+        #    resolved,否则告警永远 open;
+        # ② 有 pending/open 事件的容器必须始终覆盖——pending 恢复要静默删,
+        #    open 要 resolved,漏盖会悬挂成孤儿;
+        # ③ running 且无事件的容器无任何工作,排除后不再全表 JOIN 白搬
+        #    (此前 23 容器 21 行白搬)。
+        # state 为 NULL 的行语义是「未知状态」(评估值 1),不能被 != 'running'
+        # 的 SQL 三值逻辑误排除,显式 IS NULL 并入第一集合。
+        _has_active_event = (
+            db.query(AlertEvent.id)
+            .filter(
+                AlertEvent.resource_type == "container",
+                AlertEvent.metric == "container_status",
+                AlertEvent.status.in_(("pending", "open")),
+                AlertEvent.resource_id == DeviceContainer.container_id,
+            )
+            .exists()
+        )
+        narrowed = or_(
+            DeviceContainer.state.is_(None),
+            DeviceContainer.state != "running",
+            _has_active_event,
+        )
         device_rows = (
             db.query(DeviceContainer, Device)
             .join(Device, Device.id == DeviceContainer.device_id)
+            .filter(narrowed)
             .all()
         )
         # PVE 虚拟机的容器经 pve_guest_binding_id 归属,不对应 devices 表,
@@ -1375,6 +1113,7 @@ def evaluate_container_alerts() -> None:
                 PveGuestBinding.id == DeviceContainer.pve_guest_binding_id,
             )
             .join(PveConnection, PveConnection.id == PveGuestBinding.connection_id)
+            .filter(narrowed)
             .all()
         )
         resources = []
@@ -1876,13 +1615,6 @@ def sweep_maintenance_summaries() -> int:
             "Maintenance window %s summarized (%d muted)", window.id, window.muted_count
         )
     return summarized
-
-
-def _int_or_none(value) -> int | None:
-    try:
-        return int(str(value))
-    except (TypeError, ValueError):
-        return None
 
 
 def _event_container_owner(event: AlertEvent) -> int | None:

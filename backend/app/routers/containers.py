@@ -352,6 +352,7 @@ def control_container(
             success=1 if success else 0,
             message=message,
             keep_volumes=(bool(body.keep_volumes) if action == "remove" else None),
+            source="user",
         )
     )
     db.commit()

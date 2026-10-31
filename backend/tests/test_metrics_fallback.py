@@ -146,8 +146,9 @@ def test_stale_latest_uses_db(sample_device):
     assert entry["cpu_pct"] == 17.0  # DB 样本盖过超龄内存值
 
 
-def test_oversized_sample_not_treated_as_data(sample_device):
-    """超龄样本不算"有数据"——但设备绑了凭据,应得到 available=False 合成条目。"""
+def test_oversized_sample_kept_as_last_known_snapshot(sample_device):
+    """超龄样本保留为「最后在线快照」(2026-10-31 用户拍板)——设备宕机后
+    列表页靠它展示最后已知指标与最后采集时间,而不是整体消失。"""
     _reset_state()
     db: Session = SessionLocal()
     try:
@@ -158,27 +159,27 @@ def test_oversized_sample_not_treated_as_data(sample_device):
     finally:
         db.close()
     entry = mc.get_device_metrics(sample_device)
-    # 合成条目:明确说"最近无采集数据",列表页据此带原因显示或按规则剔除,
-    # 而不是退回「还没采集过」的含糊兜底。
     assert entry is not None
-    assert entry["available"] is False
-    assert "采集" in str(entry["error"])
+    assert entry["available"] is True
+    assert entry["cpu_pct"] == 17.0  # 最后已知值仍在
+    # fetched_at 保留真实(旧)时刻,前端用过期徽标表达陈旧度
+    assert entry["fetched_at"] is not None
 
 
 def test_uncredentialed_device_not_synthized(sample_device):
-    """未绑凭据且无新鲜样本的设备不补合成条目(由列表页自己的凭据规则处理,
-    不冒充「采集失败」)。设备有新鲜样本时仍返回 available=True——样本真实
-    存在,与凭据无关。"""
+    """未绑凭据的设备不补 available=False 合成条目(由列表页自己的凭据规则
+    处理,不冒充「采集失败」)。已有样本行(含超龄的最后快照)仍照常返回——
+    样本真实存在,与凭据无关。"""
     _reset_state()
     db: Session = SessionLocal()
     try:
-        # 同时清凭据和样本(样本超龄 = 无新鲜数据)
+        # 清凭据 + 样本整体删除(= 从无样本)
         db.query(Device).filter(Device.id == sample_device).update(
             {"remote_username": None}
         )
         db.query(DeviceMetricSample).filter(
             DeviceMetricSample.device_id == sample_device
-        ).update({"ts": datetime.now(timezone.utc) - timedelta(days=1)})
+        ).delete()
         db.commit()
     finally:
         db.close()

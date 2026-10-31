@@ -23,68 +23,72 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import requests
 from sqlalchemy.orm import Session
 
 from app.config import (
+    AGENT_ACTION_APPROVAL_LIMIT,  # noqa: F401 — patch seam(agent.AGENT_ACTION_*)
+    AGENT_ACTION_APPROVAL_TIMEOUT,  # noqa: F401 — patch seam
+    AGENT_ACTION_LIMIT,  # noqa: F401 — patch seam
     AGENT_CMD_TIMEOUT,
-    AGENT_ENABLED,
-    AGENT_LLM_API_KEY,
-    AGENT_LLM_BASE_URL,
     AGENT_LLM_MAX_RETRIES,
-    AGENT_LLM_MODEL,
     AGENT_LLM_REPORT_TIMEOUT,
     AGENT_MAX_CONCURRENT_RUNS,
     AGENT_MAX_OUTPUT_CHARS,
-    AGENT_MAX_STEPS,
     ALERT_ANALYSIS_LLM_TIMEOUT,
 )
 from app.database import SessionLocal
 from app.models.agent_run import AgentRun
-from app.models.device import Device, is_windows_os
-from app.models.device_metric_sample import DeviceMetricSample
-from app.models.pve_guest_binding import PveGuestBinding
-from app.services import agent_commands
-from app.services.crypto import decrypt
-from app.services.pve_guest_status import get_guest_metric_history
+from app.models.device import Device
+from app.services import (
+    agent_actions,
+    agent_commands,  # noqa: F401  测试经 agent_service.agent_commands patch
+    agent_primitives,
+)
+from app.services.agent_approval import (  # noqa: F401 — 门面 re-export,patch seam 保持 agent 命名空间
+    _action_denied,
+    _approval_events,
+    _approval_events_lock,
+    _audit_container_action,
+    _dispatch_run_action,
+    _finalize_dangling_approvals,
+    _run_action_exec,
+    decide_approval,
+)
+from app.services.agent_catalog import (  # noqa: F401
+    _DIAGNOSTIC_HINTS,
+    _DOCKER_GATED_KEYS,
+    _SUPPLEMENT_BUDGET,
+    _docker_absent_note,
+    _full_catalog,
+    _select_catalog,
+)
+from app.services.agent_exec import (  # noqa: F401
+    _diagnostic_output,
+    _exec_diagnostic,
+    _resolve_creds,
+    _SshSession,
+)
+from app.services.agent_metrics import _metrics_summary  # noqa: F401
+from app.services.agent_prompt import (  # noqa: F401
+    _DOMAIN_GUIDANCE,
+    _SYSTEM_PROMPT,
+    _build_system_prompt,
+)
+from app.services.agent_types import (  # noqa: F401
+    AgentConfig,
+    AgentError,
+    AgentTarget,
+    get_agent_config,
+)
 from app.services.settings import get_setting
 from app.validators import validate_outbound_url
 
 logger = logging.getLogger(__name__)
 
 
-class AgentError(Exception):
-    """LLM 未配置/调用失败/步数超限等。"""
-
-
-@dataclass
-class AgentTarget:
-    """Device-compatible runtime target for a PVE guest binding."""
-
-    id: int | None
-    name: str
-    ip_address: str | None
-    os_system: str
-    credential_id: int | None = None
-    username: str | None = None
-    password: str | None = None
-    ssh_key: str | None = None
-    ssh_port: int = 22
-    winrm_port: int = 5985
-    ssh_host_key: str | None = None
-    type: str = "server"
-
-    @property
-    def is_windows(self) -> bool:
-        """与 Device.is_windows 同一口径(共享 is_windows_os 真源)。"""
-        return is_windows_os(self.os_system)
-
-
-# 进程重启打断诊断时写进 AgentRun.error 的固定原因。告警自愈据此区分"平台自己
-# 把归因掐了"和"归因真跑出了失败结论"，前者要退回未分析重跑，不该报给值班人。
 INTERRUPTED_RUN_ERROR = "服务重启，Agent 诊断线程已中断"
 
 
@@ -98,72 +102,17 @@ def recover_interrupted_runs() -> int:
             row.error = INTERRUPTED_RUN_ERROR
         if rows:
             db.commit()
+        try:
+            # 悬挂审批一并收敛:pending→expired、approved 未执行→execution_failed,
+            # 重启恢复绝不自动补执行写操作。
+            _finalize_dangling_approvals(db)
+        except Exception:
+            logger.debug(
+                "finalize dangling approvals on recovery failed", exc_info=True
+            )
         return len(rows)
     finally:
         db.close()
-
-
-# ── 配置解析:DB 设置优先,.env 兜底(系统管理页可改,保存即生效)──
-
-
-class AgentConfig:
-    def __init__(
-        self,
-        *,
-        enabled: bool,
-        base_url: str,
-        api_key: str,
-        model: str,
-        max_steps: int,
-    ):
-        self.enabled = enabled
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
-        self.model = model
-        self.max_steps = max_steps
-
-    @property
-    def configured(self) -> bool:
-        return bool(self.base_url and self.api_key and self.model)
-
-    @property
-    def ready(self) -> bool:
-        return self.enabled and self.configured
-
-
-def get_agent_config(db: Session) -> AgentConfig:
-    """有效配置:DB(agent_*)优先,未设置项回退 .env。API Key 在 DB 中加密存储。"""
-    enabled_raw = get_setting(db, "agent_enabled")
-    enabled = (enabled_raw.lower() == "true") if enabled_raw else AGENT_ENABLED
-
-    base_url = get_setting(db, "agent_base_url") or AGENT_LLM_BASE_URL
-
-    api_key = ""
-    api_key_enc = get_setting(db, "agent_api_key")
-    if api_key_enc:
-        try:
-            api_key = decrypt(api_key_enc)
-        except Exception:
-            logger.warning("agent_api_key 解密失败,回退 .env")
-    if not api_key:
-        api_key = AGENT_LLM_API_KEY
-
-    model = get_setting(db, "agent_model") or AGENT_LLM_MODEL
-
-    max_steps_raw = get_setting(db, "agent_max_steps")
-    try:
-        max_steps = int(max_steps_raw) if max_steps_raw else AGENT_MAX_STEPS
-    except ValueError:
-        max_steps = AGENT_MAX_STEPS
-    max_steps = min(max(max_steps, 1), 20)
-
-    return AgentConfig(
-        enabled=enabled,
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        max_steps=max_steps,
-    )
 
 
 _TOOLS = [
@@ -179,11 +128,18 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "run_diagnostic",
-            "description": "按 key 执行一个只读诊断项,返回命令输出。只能使用 list_diagnostics 返回的 key。",
+            "description": "按 key 执行一个只读诊断项,返回命令输出。只能使用上下文中列出的 key(已选诊断项或补充只读项);目录说明标注「参数:」的项是参数化取证项,需在 params 对象里按名传参。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "key": {"type": "string", "description": "诊断项 key"},
+                    "params": {
+                        "type": "object",
+                        "description": (
+                            "参数化取证项的可选参数(如 name/unit/path/tail/lines/depth),"
+                            "约束见目录说明;缺参、越界或含特殊字符会被服务端拒绝"
+                        ),
+                    },
                 },
                 "required": ["key"],
             },
@@ -209,136 +165,55 @@ _TOOLS = [
     },
 ]
 
-_SYSTEM_PROMPT = """你是 DCN 数据中心平台的资深只读诊断 Agent。目标不是展示排查步骤数量,而是用最少、最相关的证据准确回答用户的问题。
+# ── 分级动作(2026-10-25):L1「恢复方向」写免审自动,L2「中断代价」写人工审批 ──
 
-硬性规则:
-1. 你只能使用提供的三个工具(list_diagnostics / run_diagnostic / get_metrics),它们全部只读。你无法、也不允许修改目标服务器的任何状态。
-2. 服务端已在用户上下文中给出与问题相关的诊断目录,通常直接调用 run_diagnostic 即可;不要为了形式重复调用 list_diagnostics。
-3. 涉及当前状态、故障原因、配置合理性、性能或安全判断时,必须先取证再回答。不得凭常识猜测目标设备当前状态。
-4. 每项结论必须能对应到工具证据。区分“已观测事实”“基于事实的推断”“尚未验证项”,不得把推断写成事实。
-5. 命令 exit_code=0 只代表命令执行成功,不代表业务状态正常;必须检查输出内容、空结果、错误文本、时间和数据完整性。
-6. run_diagnostic 返回非 0、报错、空结果或截断时,如实说明证据质量;不要反复执行同一项,也不要用无关指标替代缺失证据。
-7. 先理解用户真正要判断的对象和标准,再选择最小充分证据集。具体问题只执行直接相关项;只有用户明确要求全面检查时才扩展范围。
-8. 对“是否合理/是否正常”类问题,必须先列出判断标准,再逐项对照证据,最后给出正常、存在风险或证据不足的结论。
-9. 如果当前工具确实无法覆盖问题,必须具体说明缺少哪类数据、为什么影响判断、下一步应读取什么;禁止只给笼统的“无法确认”。
-10. 最终回答前自行复核:是否回答了原问题、是否引用了真实证据、是否遗漏明显矛盾、是否把历史指标误当成当前状态。
-11. `get_metrics` 返回的是平台历史采集摘要;必须检查 `latest_sample_at`、`age_seconds` 和 `data_status`。数据过期时不得把它描述为当前实时状态。
+_ACTION_MODES = ("readonly", "standard", "strict")
 
-范围控制:
-12. 用户询问具体对象或单一现象(例如 Traefik 路由、某个服务、某个端口)时,只执行与该对象直接相关的诊断项,最多 2 项;禁止顺便检查 CPU、内存、磁盘、登录记录等无关项目。
-13. 只有用户明确要求“全面检查/系统健康/整体排查/全量”时,才允许扩展到多个资源维度。
-14. 如果目录中没有与问题直接相关的诊断项,应明确说明无法通过当前诊断项确认,不得用无关指标代替。
-
-最终报告用中文,Markdown 结构:
-## 结论
-直接回答原问题,给出结论和置信度(高/中/低)。
-## 判断依据
-列出采用的判断标准及对应证据。
-## 排查过程
-执行了哪些诊断项,各自的关键发现。
-## 发现的问题
-按严重程度列出,标注对应证据(来自哪个诊断项)。
-## 未验证项
-仅列出会实质影响结论、但当前确实缺少的数据;没有则写“无”。
-## 建议
-可操作的处置建议;涉及修改、重启、清理、创建等变更操作时,必须标注"需人工执行"。容器、服务器、主机、云服务器、虚拟机上的只读查询(进程、日志、状态、配置、资源占用等)你都能通过诊断工具直接完成,一律先自行取证,禁止把可经工具完成的只读检查推给人工。"""
-
-
-_DOMAIN_GUIDANCE = {
-    "traefik_routes": """Traefik 专项规则:
-- 路由通常位于业务容器的 Docker Compose labels,不只在 Traefik 容器本身。
-- 综合检查 rule、entrypoints、service、middlewares、TLS、目标容器状态、目标端口、Compose project/service、Docker 网络以及已加载 API 路由。
-- 重点识别空规则、重复/冲突 Host、过宽 catch-all、service 缺失、端口不匹配、HTTP/HTTPS entrypoint 与 TLS 不自洽、目标容器未运行或不在共享网络。
-- 未直接读取 compose.yml 不等于完全无法判断;先利用容器 labels、inspect 和运行时 API 给出能支持的结论。""",
-    "docker_runtime": """Docker/Compose 专项规则:
-- 区分容器 created/exited/restarting/running 与 health 状态,不要只看容器是否存在。
-- 检查 Compose project/service 归属、端口、网络和挂载之间是否自洽;异常容器应指出具体名称和状态。""",
-    "docker_processes": """容器进程专项规则:
-- pid1 即容器主进程的真实 Entrypoint/Cmd,processes 是运行中容器的进程快照;这就是容器实际运行内容的证据,不要再凭镜像名或端口推断。
-- 镜像名为 local/自定义或 PID 1 是 shell 脚本(npm start、entrypoint.sh 等)时,以 processes 里的实际进程为准。
-- docker exec 在容器缺少 ps、shell 或权限不足时会报错,如实说明该容器进程不可读,不要推断其内容。""",
-    "docker_logs": """容器日志专项规则:
-- 输出为每个容器近期日志中的错误/异常行;某容器段为空即代表近期无错误日志,不要推断为异常。
-- 结合 docker_runtime 的容器状态一起看:退出/重启中的容器重点看其日志段。""",
+_ACTION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run_action",
+        "description": (
+            "请求执行一个变更动作。L1(启动已停止的容器/服务)在当前模式下自动执行;"
+            "L2(重启/停止运行中的服务或容器)需人工审批,批准后才执行。"
+            "一次只能提议一个动作并等待其结果。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "动作 key"},
+                "params": {
+                    "type": "object",
+                    "description": "动作参数(name=容器名 / unit=服务名),约束见动作目录",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "处置理由:证据→为什么是这个动作→预期效果(审批卡会展示给人工)",
+                },
+            },
+            "required": ["key", "reason"],
+        },
+    },
 }
 
-# 依赖 Docker 运行时的诊断项(命令内部都以 `command -v docker` 守卫)。
-# docker_runtime/traefik_routes 是「探测项」本身,不参与门控——它们跑一次
-# 就能确认 Docker 是否存在;其余项在其确认不存在后直接短路。
-_DOCKER_GATED_KEYS = frozenset(
-    {
-        "docker_processes",
-        "docker_logs",
-        "docker_stats",
-        "traefik_runtime",
-    }
+# 仅当动作工具可用时追加到系统提示词(与 _DOMAIN_GUIDANCE 的动态拼接同思路)
+_ACTION_RULES = (
+    "\n\n变更动作纪律:"
+    "\n16. 只有当只读证据已定位根因、且动作能直接消除/缓解问题时才提议 run_action;"
+    "每次只提议一个动作并等待其结果,不要一轮里提议多个。"
+    "\n17. reason 必须写清「证据 → 为什么是这个动作 → 预期效果」,它会展示给审批人。"
+    "\n18. 动作执行后必须用只读诊断项复核效果(如服务状态/容器状态),再下结论。"
+    "\n19. 被拒绝或超时的动作不得换方式重试;转只读结论,并在建议中注明需人工执行。"
+    "\n20. custom_read 用于「已选目录与补充只读项都未覆盖」的一次性只读取证"
+    "(如统计指定日志、读取指定配置):params.command 传完整命令原文,必须只读"
+    "——写原语/重定向/命令替换会被静态拒绝;reason 说明这条命令回答什么问题;"
+    "优先用目录内已有诊断项,custom_read 是最后手段。"
 )
 
-
-def _docker_absent_note(steps: list[dict]) -> str:
-    """从已执行步骤里找 Docker 探测结论:返回未安装说明,无则空串。
-
-    三个探测项(docker_runtime / traefik_routes / traefik_runtime 命令
-    兜底)输出「未安装 Docker」即认定缺席;正常输出容器清单则视为存在。
-    """
-    for step in steps:
-        if step.get("tool") != "run_diagnostic":
-            continue
-        if str(step.get("key") or "") in (
-            "docker_runtime",
-            "traefik_routes",
-            "traefik_runtime",
-        ):
-            preview = str(step.get("preview") or "")
-            if "未安装 Docker" in preview:
-                return "未安装 Docker"
-    return ""
+# 审批事件:approval_id -> Event。审批人在 API 层决策后 set,唤醒挂起等待的
+# 诊断线程(与 _run_events 同模式);等待线程自己负责超时裁决与状态流转。
 
 
-_DIAGNOSTIC_HINTS = {
-    "system_info": "操作系统、内核和基础环境信息;不能证明业务服务健康。",
-    "cpu": "一次性 CPU 概况和进程快照;不能代表历史趋势。",
-    "load_uptime": "当前负载与运行时长;需结合 CPU/进程判断原因。",
-    "memory": "当前内存和交换分区快照。",
-    "disk": "文件系统分区容量使用;不包含应用级目录增长原因。",
-    "disk_usage_top": "目录级磁盘占用 TOP20;回答「哪个目录在涨」。大文件系统上全盘 walk 可能超时,超时或被截断时如实说明证据不可用,不要用分区级数据冒充目录级结论。",
-    "disk_io": "磁盘 IO 当前采样;设备不支持 iostat 时可能是累计计数器。",
-    "top_processes_cpu": "当前 CPU 占用最高进程快照。",
-    "top_processes_mem": "当前内存占用最高进程快照。",
-    "failed_services": "系统服务真实失败的证据(Linux: systemctl --failed;Windows: SCM 失败事件,近 24h);输出为空即无服务故障,不要自行推断“服务未运行”;不等同于指定业务接口可用。",
-    "listening_ports": "本机监听端口及进程信息;不能证明外部网络可达。",
-    "network": "本机网卡和路由配置;不能替代端到端连通性测试。",
-    "established_top": "当前已建立连接的来源统计快照。",
-    "kernel_errors": "内核近期错误日志;时间范围和权限可能影响结果。",
-    "app_errors": "近 24 小时系统日志中的错误;不包含所有应用日志文件。",
-    "zombie_processes": "僵尸进程快照。",
-    "recent_logins": "最近登录记录;仅反映系统审计日志可见内容。",
-    "traefik_routes": "所有 Docker 容器的 Traefik labels、Compose 归属和容器上下文;用于判断声明式路由。",
-    "traefik_runtime": "Traefik 容器状态、网络、挂载、启动参数及已发布 Dashboard API 路由(若可访问)。",
-    "docker_runtime": "所有 Docker 容器状态、健康状态、Compose service、网络和挂载。",
-    "docker_processes": "每个容器的 PID 1 命令行(Entrypoint/Cmd/运行用户)与运行中容器的进程快照;容器内实际运行内容的直接证据。",
-    "docker_logs": "每个容器近期日志中的错误/异常行;判断容器为何退出、重启或异常的取证项。",
-    "docker_stats": "各容器的 CPU/内存/网络 IO 快照;回答“哪个容器在占资源”。",
-    "running_services": "当前运行中的 systemd 服务清单;与 failed_services 互补。",
-    "event_errors_system": "Windows 系统错误事件。",
-    "event_errors_app": "Windows 应用错误事件。",
-    "uptime": "Windows 运行时长。",
-    "installed_updates": "Windows 最近安装补丁。",
-}
-
-
-def _build_system_prompt(catalog: dict[str, dict]) -> str:
-    guidance: list[str] = []
-    for key, text in _DOMAIN_GUIDANCE.items():
-        if key in catalog and text not in guidance:
-            guidance.append(text)
-    if not guidance:
-        return _SYSTEM_PROMPT
-    return _SYSTEM_PROMPT + "\n\n当前问题专项检查规范:\n" + "\n".join(guidance)
-
-
-# _chat 的 tools 参数哨兵:省略 "tools"/"tool_choice" 字段(与传空数组不同,
-# OpenAI 兼容接口会拒绝空数组)。单-pass 归因的结论轮不该再看到任何工具。
 _UNSET = object()
 # 瞬时错误状态码:重试有意义;其余(4xx 参数/鉴权错误)重试也是同样的错。
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
@@ -424,402 +299,6 @@ def _log_retry(reason, attempt: int, retries: int) -> None:
     time.sleep(delay)
 
 
-def _resolve_creds(db: Session, device: Device) -> tuple[str, str, str] | None:
-    direct_username = getattr(device, "username", None)
-    direct_password = getattr(device, "password", None)
-    direct_key = getattr(device, "ssh_key", None)
-    if direct_username and (direct_password or direct_key):
-        return direct_username, direct_password or "", direct_key or ""
-    username = getattr(device, "remote_username", None)
-    password = (
-        decrypt(device.remote_password_enc)
-        if getattr(device, "remote_password_enc", None)
-        else ""
-    )
-    ssh_key = (
-        decrypt(device.remote_ssh_key_enc)
-        if getattr(device, "remote_ssh_key_enc", None)
-        else ""
-    )
-    if not username or (not password and not ssh_key):
-        return None
-    return username, password, ssh_key
-
-
-class _SshSession:
-    """一次诊断内复用的 SSH 连接(Linux 目标)。
-
-    实测目标机(CentOS 7 / OpenSSH 7.4)每次新建连接的 paramiko 认证阶段要 5~10s
-    (服务端 sshd 反查/PAM 阶段耗时)，而诊断命令本身只要 0.1s 左右。归因分析一轮
-    通常执行 2 项以上诊断，逐条重连会把整个分析拖成分钟级。
-
-    这里在一轮 ``_loop`` 内复用同一条 transport，把 N 次握手压成 1 次。
-    每个诊断运行独占一个实例;交互 ``_loop`` 单线程，单-pass 归因并行
-    取证，懒开连接由 ``_open_lock`` 串行(paramiko transport 本身支持
-    多线程并发使用)。
-    """
-
-    def __init__(self) -> None:
-        self._client = None
-        self._open_lock = threading.Lock()
-
-    @staticmethod
-    def _alive(client) -> bool:
-        try:
-            transport = client.get_transport()
-            return transport is not None and transport.is_active()
-        except Exception:
-            return False
-
-    def _open(self, db: Session, device, username, password, ssh_key, timeout: int):
-        from app.services.ssh import connect_device, open_ssh_client
-
-        if isinstance(device, Device):
-            # connect_device 负责 TOFU：首次连上时把 host key 写回设备记录。
-            client, _key = connect_device(
-                device,
-                username,
-                password,
-                db=db,
-                timeout=min(timeout, 15),
-                private_key=ssh_key or None,
-            )
-            return client
-        client, _key = open_ssh_client(
-            device.ip_address,
-            device.ssh_port,
-            username,
-            password,
-            timeout=min(timeout, 15),
-            pinned_key_b64=device.ssh_host_key or None,
-            private_key=ssh_key or None,
-            allow_tofu=not bool(device.ssh_host_key),
-        )
-        return client
-
-    def exec(
-        self,
-        db: Session,
-        device,
-        username: str,
-        password: str,
-        ssh_key: str,
-        command: str,
-        timeout: int,
-    ) -> tuple[int, str, str]:
-        from app.services.ssh import exec_ssh_command
-
-        if self._client is not None and not self._alive(self._client):
-            self.close()
-        if self._client is None:
-            with self._open_lock:
-                if self._client is None:
-                    self._client = self._open(
-                        db, device, username, password, ssh_key, timeout
-                    )
-        try:
-            return exec_ssh_command(self._client, command, timeout=timeout)
-        except Exception:
-            # 连接可能在两条命令之间被对端回收：丢弃缓存、重建后重试一次。
-            self.close()
-            self._client = self._open(db, device, username, password, ssh_key, timeout)
-            return exec_ssh_command(self._client, command, timeout=timeout)
-
-    def close(self) -> None:
-        client, self._client = self._client, None
-        if client is None:
-            return
-        try:
-            client.close()
-        except Exception:
-            logger.debug("close reused SSH client failed", exc_info=True)
-
-
-def _exec_diagnostic(
-    db: Session,
-    device: Device,
-    command: str,
-    timeout: int,
-    session: "_SshSession | None" = None,
-) -> tuple[int, str, str]:
-    """经设备通道执行注册表命令(Windows→WinRM,Linux→SSH)。"""
-    creds = _resolve_creds(db, device)
-    if creds is None:
-        raise AgentError("设备未绑定有效凭据,无法执行诊断")
-    username, password, ssh_key = creds
-
-    if device.is_windows:
-        from app.services.winrm import run_on_device
-
-        if isinstance(device, Device):
-            return run_on_device(device, username, password, command, timeout=timeout)
-        from app.services.winrm import run_powershell
-
-        return run_powershell(
-            device.ip_address,
-            username,
-            password,
-            command,
-            port=device.winrm_port,
-            timeout=timeout,
-        )
-
-    if session is not None:
-        return session.exec(db, device, username, password, ssh_key, command, timeout)
-
-    from app.services.ssh import exec_on_device, exec_ssh_command, open_ssh_client
-
-    if isinstance(device, Device):
-        return exec_on_device(
-            device,
-            username,
-            password,
-            command,
-            timeout=timeout,
-            db=db,
-            private_key=ssh_key or None,
-        )
-    client, _key = open_ssh_client(
-        device.ip_address,
-        device.ssh_port,
-        username,
-        password,
-        timeout=min(timeout, 15),
-        pinned_key_b64=device.ssh_host_key or None,
-        private_key=ssh_key or None,
-        allow_tofu=not bool(device.ssh_host_key),
-    )
-    try:
-        return exec_ssh_command(client, command, timeout=timeout)
-    finally:
-        client.close()
-
-
-def _diagnostic_output(exit_code: int, out: str, err: str) -> str:
-    """挑出该交给 LLM 的那一段输出。
-
-    成功时只用 stdout。旧写法 ``out or err`` 在 stdout 为空时回退到 stderr，
-    而 stderr 是 PowerShell 的告警/进度流。对诊断而言「命令成功且无输出」
-    本身就是结论(例如近 24h 无服务失败事件)，回退之后模型读到的是几百字符
-    CLIXML 噪音，得先自己看懂那段 XML 才能得出「无异常」——白耗 token、
-    且结论靠运气。exit_code 已经能区分成败，失败时才需要 stderr 当错误信息。
-    """
-    if exit_code == 0:
-        return out or ""
-    return err or out or ""
-
-
-def _metrics_summary(db: Session, device: Device | AgentTarget, hours: int) -> str:
-    """近 N 小时指标的紧凑摘要(给 LLM 的上下文,不是完整时序)。
-
-    物理设备读 ``DeviceMetricSample``;虚拟机(AgentTarget,id=None)没有 ORM
-    指标记录,改用 PVE 快照环内存历史(经运维接入绑定按 IP 反查宿主身份)。
-    """
-    device_id = getattr(device, "id", None)
-    if device_id is not None:
-        return _device_metrics_summary(db, device_id, hours)
-    if not device.ip_address:
-        return json.dumps(
-            {"note": "目标无 IP,无法关联平台采集数据"}, ensure_ascii=False
-        )
-    binding = (
-        db.query(PveGuestBinding)
-        .filter(
-            PveGuestBinding.ip_address == device.ip_address.strip(),
-            PveGuestBinding.enabled == 1,
-        )
-        .first()
-    )
-    if binding is None:
-        return json.dumps(
-            {"note": "PVE 虚拟机尚未接入平台指标采集,请使用虚拟机内诊断项取证"},
-            ensure_ascii=False,
-        )
-    return _guest_metrics_summary(binding.connection_id, binding.vmid, hours)
-
-
-def _device_metrics_summary(db: Session, device_id: int, hours: int) -> str:
-    """物理设备:DeviceMetricSample 的窗口统计。"""
-    hours = min(max(hours, 1), 168)
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    rows = (
-        db.query(DeviceMetricSample)
-        .filter(
-            DeviceMetricSample.device_id == device_id,
-            DeviceMetricSample.ts >= since,
-        )
-        .order_by(DeviceMetricSample.ts)
-        .all()
-    )
-    if not rows:
-        return json.dumps({"note": "该时间范围内无采集数据"}, ensure_ascii=False)
-
-    latest_ts = rows[-1].ts
-    if latest_ts.tzinfo is None:
-        latest_ts = latest_ts.replace(tzinfo=timezone.utc)
-    age_seconds = max(0, int((datetime.now(timezone.utc) - latest_ts).total_seconds()))
-
-    def _stat(field: str) -> dict | None:
-        vals = [getattr(r, field) for r in rows if getattr(r, field) is not None]
-        if not vals:
-            return None
-        return {
-            "latest": round(vals[-1], 1),
-            "avg": round(sum(vals) / len(vals), 1),
-            "max": round(max(vals), 1),
-        }
-
-    summary = {
-        "window_hours": hours,
-        "samples": len(rows),
-        "latest_sample_at": latest_ts.isoformat(),
-        "age_seconds": age_seconds,
-        "data_status": "stale" if age_seconds > 180 else "fresh",
-        "cpu_pct": _stat("cpu_pct"),
-        "mem_pct": _stat("mem_pct"),
-        "disk_max_pct": _stat("disk_max_pct"),
-        "load1": _stat("load1"),
-        "net_rx_bps": _stat("net_rx_bps"),
-        "net_tx_bps": _stat("net_tx_bps"),
-        "disk_read_bps": _stat("disk_read_bps"),
-        "disk_write_bps": _stat("disk_write_bps"),
-    }
-    return json.dumps(summary, ensure_ascii=False)
-
-
-def _guest_metrics_summary(connection_id: int, vmid: int, hours: int) -> str:
-    """虚拟机:PVE 快照环历史的窗口统计(cpu/mem 与告警评估同口径)。
-
-    磁盘使用率快照里没有(告警评估也不产出),不编造字段。
-    """
-    samples = get_guest_metric_history(connection_id, vmid)
-    if not samples:
-        return json.dumps(
-            {"note": "PVE 快照历史尚为空(采集刚启动或本实例非 leader)"},
-            ensure_ascii=False,
-        )
-    hours = min(max(hours, 1), 168)
-    cutoff = time.time() - hours * 3600
-    rows = [s for s in samples if float(s.get("ts") or 0) >= cutoff]
-    if not rows:
-        return json.dumps({"note": "该时间范围内无采集数据"}, ensure_ascii=False)
-
-    latest = rows[-1]
-    latest_ts = float(latest.get("ts") or 0)
-
-    cpu_vals = [round(float(s.get("cpu") or 0) * 100.0, 1) for s in rows]
-
-    def _pct(field: str, total_field: str) -> dict | None:
-        vals = [
-            round(float(s.get(field) or 0) / float(s.get(total_field) or 0) * 100.0, 1)
-            for s in rows
-            if s.get(total_field)
-        ]
-        if not vals:
-            return None
-        return {
-            "latest": vals[-1],
-            "avg": round(sum(vals) / len(vals), 1),
-            "max": round(max(vals), 1),
-        }
-
-    summary = {
-        "window_hours": hours,
-        "samples": len(rows),
-        "latest_sample_at": datetime.fromtimestamp(
-            latest_ts, tz=timezone.utc
-        ).isoformat(),
-        "age_seconds": max(0, int(time.time() - latest_ts)),
-        "data_status": "stale" if time.time() - latest_ts > 180 else "fresh",
-        "status": latest.get("status"),
-        "cpu_pct": (
-            {
-                "latest": cpu_vals[-1],
-                "avg": round(sum(cpu_vals) / len(cpu_vals), 1),
-                "max": round(max(cpu_vals), 1),
-            }
-            if cpu_vals
-            else None
-        ),
-        "mem_pct": _pct("mem", "maxmem"),
-    }
-    return json.dumps(summary, ensure_ascii=False)
-
-
-def _select_catalog(
-    device: Device,
-    question: str,
-    focus: list[str] | tuple[str, ...] | None = None,
-    full_catalog: dict[str, dict] | None = None,
-) -> dict[str, dict]:
-    """按用户问题收窄 Agent 可见的诊断目录，避免具体问题触发全量巡检。
-
-    ``focus`` 由调用方显式指定要查的诊断项。指标告警归因用的是固定话术，
-    里面的"异常进程""进程/服务"会被关键词规则误判成日志和服务诊断项，
-    把只有 2 项的预算浪费在最慢的 ``journalctl`` 上，所以这类调用必须显式给 focus。
-    """
-    if full_catalog is None:
-        full_catalog = agent_commands.get_diagnostics_for_device(device)
-    if focus:
-        picked = {key: full_catalog[key] for key in focus if key in full_catalog}
-        if picked:
-            return picked
-    text = (question or "").strip().lower()
-
-    # 用户明确要求综合体检时，保留完整目录。
-    if any(
-        word in text
-        for word in ("全面", "整体", "全部", "全量", "综合", "系统健康", "体检")
-    ):
-        return full_catalog
-
-    groups: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
-        (
-            (
-                "traefik",
-                "router",
-                "ingress",
-                "反向代理",
-                "中间件",
-                "entrypoint",
-                "域名路由",
-            ),
-            ("traefik_routes", "traefik_runtime"),
-        ),
-        (
-            ("docker", "容器", "compose", "container"),
-            ("docker_runtime", "docker_processes", "docker_logs", "docker_stats"),
-        ),
-        (
-            ("cpu", "处理器", "负载", "load"),
-            ("cpu", "load_uptime", "top_processes_cpu"),
-        ),
-        (("内存", "memory", "mem"), ("memory", "top_processes_mem")),
-        (("磁盘", "disk", "存储", "分区"), ("disk", "disk_io")),
-        (("活跃连接", "连接数", "连接", "established"), ("established_top",)),
-        (("端口", "监听", "listen", "port"), ("listening_ports",)),
-        (("网络", "网卡", "路由表", "network"), ("network", "listening_ports")),
-        (
-            ("服务", "service", "systemd"),
-            ("failed_services", "running_services", "listening_ports"),
-        ),
-        (("日志", "错误", "异常", "error", "log"), ("app_errors", "kernel_errors")),
-    ]
-
-    selected: set[str] = set()
-    # “路由”单独出现时通常指反向代理路由；明确说“网络路由”则交给网络诊断项。
-    if "路由" in text and "网络" not in text:
-        selected.add("traefik_routes")
-    for keywords, keys in groups:
-        if any(keyword in text for keyword in keywords):
-            selected.update(key for key in keys if key in full_catalog)
-
-    # 无法识别意图时仍提供完整目录，避免自然语言问题被错误地限制为空。
-    if not selected:
-        return full_catalog
-    return {key: full_catalog[key] for key in full_catalog if key in selected}
-
-
 def _dispatch(
     db: Session,
     device: Device,
@@ -830,6 +309,10 @@ def _dispatch(
     diagnostic_budget: int | None = None,
     metrics_allowed: bool = True,
     session: _SshSession | None = None,
+    mode: str = "readonly",
+    l1_auto: bool = False,
+    run_id: int | None = None,
+    on_step=None,
 ) -> str:
     """执行一个 tool_call 并返回 tool 消息内容。key 白名单校验在这里。"""
     name = call.get("function", {}).get("name", "")
@@ -874,6 +357,29 @@ def _dispatch(
         key = str(args.get("key") or "")
         item = catalog.get(key)
         if item is None:
+            # 补充只读项(2026-10-30):全量注册表允许按需调用。关键词收窄只
+            # 决定「优先取哪些」,不是可执行边界——否则免审白名单项因问题措辞
+            # 没被选中就不可调用,LLM 只能退到 custom_read 自写命令全走审批
+            # (run 664 实测:问「跑的应用」,docker 项没入选,docker ps/logs
+            # 全进审批)。命令仍是服务端钉死的只读模板,红线未变。
+            item = _full_catalog(device).get(key)
+        if item is None:
+            # 动作 key 误用引导(run 782:docker_logs 被预算拒后,LLM 试图借
+            # run_diagnostic 调 custom_read 绕审批)——正确通道是 run_action。
+            hint = ""
+            if key in agent_actions.actions_catalog_for(device):
+                hint = (
+                    f";{key} 是动作目录项,请改用 run_action 工具调用"
+                    "(custom_read 类需人工审批)"
+                )
+            elif key in (
+                "run_diagnostic",
+                "run_action",
+                "get_metrics",
+                "list_diagnostics",
+            ):
+                # 工具名误当 key(run 1056:run_diagnostic 被传给 run_diagnostic)
+                hint = ";这是工具名不是诊断项 key,请从上下文列出的诊断项中选择"
             # LLM 幻觉出的 key / 试图执行注册表外的命令——拒绝并记录
             steps.append(
                 {
@@ -885,11 +391,25 @@ def _dispatch(
             )
             return json.dumps(
                 {
-                    "error": f"诊断项 {key!r} 不存在,请从 list_diagnostics 返回的 key 中选择"
+                    "error": (
+                        f"诊断项 {key!r} 不存在,请从上下文列出的诊断项 key 中选择{hint}"
+                    )
                 },
                 ensure_ascii=False,
             )
-        if executed_keys is not None and key in executed_keys:
+        # 参数化取证项:不同参数(如两个容器的日志)是不同证据,按 key+参数去重
+        params = args.get("params") if item.get("parameterized") else None
+        dedup_key = key
+        if item.get("parameterized"):
+            try:
+                dedup_key = f"{key}|{json.dumps(params or {}, sort_keys=True, ensure_ascii=False)}"
+            except (TypeError, ValueError):
+                dedup_key = f"{key}|{params!r}"
+        if executed_keys is not None and dedup_key in executed_keys:
+            # 附已执行清单:LLM 重复点名多因忘了本轮跑过什么,给它清单比一句
+            # 「已执行」更能引导下一轮换项(run 843 里 docker_runtime 被重复
+            # 点名拒了一次)。
+            done = ", ".join(sorted(k.split("|", 1)[0] for k in executed_keys))
             steps.append(
                 {
                     "tool": "run_diagnostic",
@@ -900,32 +420,41 @@ def _dispatch(
                 }
             )
             return json.dumps(
-                {"key": key, "error": "该诊断项已执行,无需重复执行"},
+                {
+                    "key": key,
+                    "error": f"该诊断项已执行,无需重复执行;本轮已执行项: {done}",
+                },
                 ensure_ascii=False,
             )
-        if (
-            diagnostic_budget is not None
-            and executed_keys is not None
-            and len(executed_keys) >= diagnostic_budget
-        ):
+        # 预算分道(2026-10-30):目录内项对 diagnostic_budget;补充项对独立的
+        # _SUPPLEMENT_BUDGET(按 key 前缀统计,顺序无关)——否则目录预算用满后
+        # 兑底通道被掐死,LLM 只能空手写结论。
+        budget_reject: str | None = None
+        if diagnostic_budget is not None and executed_keys is not None:
+            if key not in catalog:
+                used = sum(
+                    1 for k in executed_keys if k.split("|", 1)[0] not in catalog
+                )
+                if used >= _SUPPLEMENT_BUDGET:
+                    budget_reject = (
+                        f"补充只读项最多执行 {_SUPPLEMENT_BUDGET} 项;"
+                        "请基于已有证据给出结论或说明证据不足"
+                    )
+            elif len(executed_keys) >= diagnostic_budget:
+                budget_reject = f"具体问题最多执行 {diagnostic_budget} 项相关诊断"
+        if budget_reject:
             steps.append(
                 {
                     "tool": "run_diagnostic",
                     "key": key,
                     "label": item["label"],
                     "ok": False,
-                    "error": f"具体问题最多执行 {diagnostic_budget} 项相关诊断",
+                    "error": budget_reject,
                 }
             )
-            return json.dumps(
-                {
-                    "key": key,
-                    "error": f"具体问题最多执行 {diagnostic_budget} 项相关诊断",
-                },
-                ensure_ascii=False,
-            )
+            return json.dumps({"key": key, "error": budget_reject}, ensure_ascii=False)
         if executed_keys is not None:
-            executed_keys.add(key)
+            executed_keys.add(dedup_key)
         # Docker 依赖门控:docker_runtime(或任一 docker 前置项)已确认目标
         # 未安装 Docker 时,后续 docker/traefik 系列诊断项必然也拿不到数据
         # (每个命令都自带 `command -v docker` 守卫并输出「未安装 Docker」),
@@ -941,12 +470,35 @@ def _dispatch(
                 },
                 ensure_ascii=False,
             )
+        if item.get("parameterized"):
+            try:
+                built = agent_primitives.build_command(key, params, device)
+            except agent_primitives.PrimitiveError as exc:
+                steps.append(
+                    {
+                        "tool": "run_diagnostic",
+                        "key": key,
+                        "label": item["label"],
+                        "params": params,
+                        "ok": False,
+                        "error": f"参数校验失败: {exc}",
+                    }
+                )
+                return json.dumps(
+                    {"key": key, "error": f"参数校验失败: {exc}"}, ensure_ascii=False
+                )
+            command = built["command"]
+            timeout = min(built["timeout"], AGENT_CMD_TIMEOUT)
+        else:
+            command = item["command"]
+            timeout = min(item["timeout"], AGENT_CMD_TIMEOUT)
+        _t0 = time.monotonic()
         try:
             exit_code, out, err = _exec_diagnostic(
                 db,
                 device,
-                item["command"],
-                min(item["timeout"], AGENT_CMD_TIMEOUT),
+                command,
+                timeout,
                 session=session,
             )
         except Exception as exc:
@@ -957,23 +509,33 @@ def _dispatch(
                     "label": item["label"],
                     "ok": False,
                     "error": str(exc)[:200],
+                    "duration_ms": int((time.monotonic() - _t0) * 1000),
                 }
             )
             return json.dumps({"key": key, "error": str(exc)[:300]}, ensure_ascii=False)
 
-        raw_text = _diagnostic_output(exit_code, out, err)
+        # 输出统一脱敏:固定项(docker inspect 的 env/labels)与原语一样可能带凭据
+        raw_text = agent_primitives.redact_output(
+            _diagnostic_output(exit_code, out, err)
+        )
         truncated = len(raw_text) > AGENT_MAX_OUTPUT_CHARS
         text = raw_text[:AGENT_MAX_OUTPUT_CHARS]
-        steps.append(
-            {
-                "tool": "run_diagnostic",
-                "key": key,
-                "label": item["label"],
-                "ok": exit_code == 0,
-                "preview": text[:300],
-                "truncated": truncated,
-            }
-        )
+        step_record = {
+            "tool": "run_diagnostic",
+            "key": key,
+            "label": item["label"],
+            # 命令原文随步骤落库(2026-10-30):时间线要展示"执行了什么指令",
+            # 固定项/原语都是服务端白名单拼装,展示无风险
+            "command": command,
+            "ok": exit_code == 0,
+            "preview": text[:300],
+            "truncated": truncated,
+            # 步骤级耗时(run 1056 复盘):定位慢项(installed_updates 类 CIM 查询)
+            "duration_ms": int((time.monotonic() - _t0) * 1000),
+        }
+        if item.get("parameterized"):
+            step_record["params"] = params
+        steps.append(step_record)
         return json.dumps(
             {
                 "key": key,
@@ -984,7 +546,15 @@ def _dispatch(
             ensure_ascii=False,
         )
 
+    if name == "run_action":
+        return _dispatch_run_action(
+            db, device, args, steps, mode, l1_auto, run_id, session, on_step=on_step
+        )
+
     return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
+
+
+# ── 变更动作执行与审批环 ──
 
 
 def _persist_steps(run_id: int, steps: list[dict]) -> None:
@@ -1033,6 +603,9 @@ def _dispatch_calls(
     session: "_SshSession | None",
     messages: list[dict],
     on_step,
+    mode: str = "readonly",
+    l1_auto: bool = False,
+    run_id: int | None = None,
 ) -> None:
     """执行一整轮 tool_call 并按原顺序回填 tool 消息。
 
@@ -1052,6 +625,10 @@ def _dispatch_calls(
             diagnostic_budget,
             metrics_allowed,
             session=session,
+            mode=mode,
+            l1_auto=l1_auto,
+            run_id=run_id,
+            on_step=on_step,
         )
         if on_step:
             on_step(steps)
@@ -1096,6 +673,10 @@ def _dispatch_calls(
             diagnostic_budget,
             metrics_allowed,
             session=session,
+            mode=mode,
+            l1_auto=l1_auto,
+            run_id=run_id,
+            on_step=on_step,
         )
         return idx, content
 
@@ -1116,6 +697,10 @@ def _dispatch_calls(
             diagnostic_budget,
             metrics_allowed,
             session=session,
+            mode=mode,
+            l1_auto=l1_auto,
+            run_id=run_id,
+            on_step=on_step,
         )
         if on_step:
             on_step(steps)
@@ -1137,10 +722,18 @@ def _loop(
     cfg: AgentConfig,
     on_step=None,
     focus: list[str] | tuple[str, ...] | None = None,
+    mode: str = "readonly",
+    run_id: int | None = None,
 ) -> str:
-    full_catalog = agent_commands.get_diagnostics_for_device(device)
+    full_catalog = _full_catalog(device)
     catalog = _select_catalog(device, question, focus, full_catalog)
     os_label = "Windows" if device.is_windows else "Linux"
+    # 动作策略:readonly=无 run_action 工具;standard=L1 自动+L2 审批
+    # (受 settings.agent_action_l1_enabled 总开关约束);strict=写动作全审批。
+    mode = mode if mode in _ACTION_MODES else "readonly"
+    l1_auto = mode == "standard" and (
+        (get_setting(db, "agent_action_l1_enabled") or "true").lower() == "true"
+    )
 
     user_ctx = (
         f"目标设备:{device.name}(IP: {device.ip_address or '未知'},"
@@ -1148,8 +741,17 @@ def _loop(
         f"用户问题:{question}\n"
         "请开始只读排查。"
     )
+    system_prompt = _build_system_prompt(catalog)
+    action_catalog_ctx = ""
+    if mode != "readonly":
+        system_prompt += _ACTION_RULES
+        action_catalog_ctx = "；".join(
+            f"{k}（{v['label']},风险 {v['risk'].upper()},"
+            f"参数: {','.join(v['param_names'])}）"
+            for k, v in agent_actions.actions_catalog_for(device).items()
+        )
     messages = [
-        {"role": "system", "content": _build_system_prompt(catalog)},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_ctx},
     ]
     selected_keys = (
@@ -1158,15 +760,40 @@ def _loop(
         )
         or "无"
     )
+    # 补充只读项:全量注册表减已选目录。让 LLM 在已选目录覆盖不了取证需求时
+    # 能直接调免审白名单项(而不是退到 custom_read 自写命令进审批),但明确
+    # 约束只在覆盖不了时用,防借机全量巡检。参数化项带参数名提示。
+    supplemental_keys = "；".join(
+        f"{key}（{item['label']}）"
+        for key, item in full_catalog.items()
+        if key not in catalog
+    )
+    supplement_ctx = (
+        "\n补充只读项(注册表全量,仅当已选目录覆盖不了取证需求时按 key 调用,"
+        f"禁止借机全量巡检): {supplemental_keys}。"
+        if supplemental_keys
+        else ""
+    )
     messages.append(
         {
             "role": "user",
             "content": (
                 f"本轮服务端筛选出的相关诊断项为: {selected_keys}。\n"
-                "请优先使用这些诊断项取证;不要自行扩大到目录之外。"
+                f"请优先使用这些诊断项取证。{supplement_ctx}"
             ),
         }
     )
+    if action_catalog_ctx:
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"本次诊断允许的变更动作(L2 需人工审批,批准后才执行): "
+                    f"{action_catalog_ctx}。\n"
+                    "动作是最后手段:先完成只读取证,再在必要时提议单个动作。"
+                ),
+            }
+        )
     executed_keys: set[str] = set()
     # 具体问题默认最多 2 项诊断;目录自带 3 项以上的分组(如 Docker 组 4 项),
     # 预算取下限,保证同组取证能跑完,又不放任全量体检。
@@ -1198,6 +825,8 @@ def _loop(
         for tool in available_tools
         if tool["function"]["name"] != "list_diagnostics"
     ]
+    if mode != "readonly":
+        available_tools = available_tools + [_ACTION_TOOL]
     usage: list[dict] = []
     evidence_retry = False
 
@@ -1246,6 +875,9 @@ def _loop(
                 session,
                 messages,
                 on_step,
+                mode=mode,
+                l1_auto=l1_auto,
+                run_id=run_id,
             )
 
         raise AgentError(f"超过最大诊断步数({cfg.max_steps}),已中止")
@@ -1351,7 +983,7 @@ def run_focus_diagnosis(
     结论轮不带任何工具(协议上就发不了 tool_call,不会再出现"模型违反提示去
     调工具→content 为空→报告变成占位符"的情况),超时用归因专用的更紧预算。
     """
-    full_catalog = agent_commands.get_diagnostics_for_device(device)
+    full_catalog = _full_catalog(device)
     catalog = {key: full_catalog[key] for key in focus if key in full_catalog}
     if not catalog:
         raise AgentError("归因取证项为空或目标平台不具备其中任何一项")
@@ -1463,8 +1095,14 @@ def start_diagnosis(
     cfg: AgentConfig | None = None,
     focus: list[str] | tuple[str, ...] | None = None,
     single_pass: bool = False,
+    mode: str = "readonly",
+    job_id: int | None = None,
+    job_target_id: int | None = None,
 ) -> int:
-    """创建运行记录、后台线程执行诊断,立即返回 run_id(前端轮询进度)。"""
+    """创建运行记录、后台线程执行诊断,立即返回 run_id(前端轮询进度)。
+
+    job_id/job_target_id(2026-10-30 统一执行记录入口):实时诊断发起时同步
+    落一条 automation job 记录,run 终态后由 _execute_run 回写任务状态。"""
     if cfg is None:
         db0 = SessionLocal()
         try:
@@ -1472,6 +1110,7 @@ def start_diagnosis(
         finally:
             db0.close()
 
+    mode = mode if mode in _ACTION_MODES else "readonly"
     db = SessionLocal()
     try:
         run = AgentRun(
@@ -1481,6 +1120,7 @@ def start_diagnosis(
             device_ip=device.ip_address,
             question=question[:1000],
             status="running",
+            mode=mode,
             created_at=datetime.now(timezone.utc),
         )
         db.add(run)
@@ -1490,10 +1130,31 @@ def start_diagnosis(
     finally:
         db.close()
 
+    if job_target_id:
+        # 预写 run 链接:任务详情抽屉运行中即可跳时间线(终态覆写完整结果)
+        try:
+            from app.services.automation import link_agent_run
+
+            link_agent_run(job_target_id, run_id)
+        except Exception:
+            logger.warning(
+                "link agent run %s to job target %s failed", run_id, job_target_id
+            )
+
     _register_run_event(run_id)
     threading.Thread(
         target=_execute_run,
-        args=(run_id, device, question, cfg, focus, single_pass),
+        args=(
+            run_id,
+            device,
+            question,
+            cfg,
+            focus,
+            single_pass,
+            mode,
+            job_id,
+            job_target_id,
+        ),
         daemon=True,
         name=f"agent-run-{run_id}",
     ).start()
@@ -1507,6 +1168,9 @@ def _execute_run(
     cfg: AgentConfig,
     focus: list[str] | tuple[str, ...] | None = None,
     single_pass: bool = False,
+    mode: str = "readonly",
+    job_id: int | None = None,
+    job_target_id: int | None = None,
 ) -> None:
     """后台线程:执行诊断循环,步骤增量落库,结束写终态。
 
@@ -1548,6 +1212,8 @@ def _execute_run(
                         cfg,
                         on_step=on_step,
                         focus=focus,
+                        mode=mode,
+                        run_id=run_id,
                     )
             finally:
                 db.close()
@@ -1568,8 +1234,28 @@ def _execute_run(
             row.steps_json = json.dumps(steps, ensure_ascii=False)
             row.duration_ms = duration_ms
             db.commit()
+        # 安全网:异常路径下悬挂的审批收敛(正常路径各状态已就地流转)
+        try:
+            _finalize_dangling_approvals(db, run_id)
+        except Exception:
+            logger.debug("finalize approvals failed for run %s", run_id, exc_info=True)
     finally:
         db.close()
+        # 统一执行记录入口(2026-10-30):实时诊断 run 终态同步任务记录。
+        # 必须在 run 终态 commit 之后;失败只记日志,不影响 run 本身的状态。
+        if job_id and job_target_id:
+            try:
+                from app.services.automation import finish_agent_job
+
+                finish_agent_job(
+                    job_id,
+                    job_target_id,
+                    "completed" if status == "completed" else "failed",
+                    {"report": report, "legacy_run_id": run_id},
+                    error,
+                )
+            except Exception:
+                logger.warning("sync agent run %s to job %s failed", run_id, job_id)
         # 终态已提交,唤醒等待方;事件对象从注册表摘掉(等待方手里已持有引用,
         # dict 里留着只会泄漏)。
         with _run_events_lock:

@@ -144,14 +144,11 @@ def list_metrics(
         query = query.filter(Device.id.in_(allowed_ids))
     devices = query.all()
 
-    # 服务器监控只展示「能真正采集到指标」的设备：
-    #   - Windows: 走 WinRM,必须有 username + password(端口默认 5985,谈不上"没配置"),
-    #     且最近一次采集没失败(采集失败说明 WinRM 实际不可用,即使凭据填了也白搭)
-    #   - Linux:   走 SSH,必须有 username + (password 或 ssh_key)
-    # 没绑凭据 / 采集持续失败的设备永远只会显示「未绑定有效凭据」或「WinRM 执行失败」,
-    # 对运维没有信息量,还会淹没列表,这里直接从列表里剔除。
-    # 一旦 WinRM 修好、下一轮采集成功(最多 60s),设备会自动恢复显示,无需手工干预。
-    # 设备详情页不受影响(用户仍可查看该设备的报错原因)。
+    # 服务器监控只展示「绑定了有效凭据」的设备——从未纳入采集的设备不该出现。
+    # 采集失败/离线不再从列表剔除(2026-10-31 用户拍板):服务器宕机后要从列表
+    # 进历史曲线判断「是否负载过高压死」,隐藏等于丢掉唯一入口。离线/失败行
+    # 由前端灰显 + 最后采集时间(fetched_at)+错误原因表达;设备恢复后下一轮
+    # 采集(最多 60s)自动新鲜,无需手工干预。
     latest = get_latest_metrics()
 
     def _is_displayable(d) -> bool:
@@ -161,14 +158,7 @@ def list_metrics(
         if not username:
             return False
         if is_windows_os(d.os_system):
-            if not has_password:
-                return False
-            # 最近一次采集明确失败 → WinRM 实际不可用,隐藏
-            # 还没采集过(available 键不存在) → 给一次机会,显示
-            m = latest.get(d.id)
-            if m is not None and m.get("available") is False:
-                return False
-            return True
+            return has_password
         return has_password or has_key
 
     devices = [d for d in devices if _is_displayable(d)]

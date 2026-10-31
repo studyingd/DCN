@@ -299,6 +299,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { usePolling } from '@/composables/usePolling'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Plus, Monitor, Connection } from '@element-plus/icons-vue'
 import { businessAPI, interfaceAPI } from '@/api'
@@ -321,7 +322,7 @@ const businesses = ref<BusinessHealthItem[]>([])
 const keyword = ref('')
 const lastLoaded = ref<string | null>(null)
 const pollError = ref('')
-let pollTimer: number | undefined
+// (pollTimer/detailPollTimer 已随 usePolling 收编删除,2026-10-31)
 let overviewRequest: Promise<void> | null = null
 
 const filteredBusinesses = computed(() => {
@@ -330,14 +331,18 @@ const filteredBusinesses = computed(() => {
   return businesses.value.filter((b) => b.name.toLowerCase().includes(q))
 })
 
-onMounted(() => {
-  loadOverview()
-  pollTimer = window.setInterval(() => {
-    if (!document.hidden) void loadOverview(true)
-  }, 30000)
+// 30s 概览轮询统一走 usePolling(2026-10-31 收编);quiet=true 不弹 loading,
+// 失败静默保持旧行为,loadOverview 自带请求去重
+const { start: startPolling, stop: stopPolling } = usePolling(() => loadOverview(true).catch(() => {}), {
+  intervalMs: 30_000,
 })
 
-onUnmounted(() => window.clearInterval(pollTimer))
+onMounted(() => {
+  loadOverview()
+  startPolling()
+})
+
+onUnmounted(stopPolling)
 
 async function loadOverview(quiet = false) {
   if (overviewRequest) return overviewRequest
@@ -473,7 +478,7 @@ const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detail = ref<BusinessDetail | null>(null)
 let detailRequestId = 0
-let detailPollTimer: number | undefined
+// (detailPollTimer 声明已删)
 
 function applyDetail(nextDetail: BusinessDetail) {
   detail.value = nextDetail
@@ -494,19 +499,20 @@ function applyDetail(nextDetail: BusinessDetail) {
 // 抽屉打开期间周期刷新(与列表轮询同 30s):接口 up/延迟/状态在
 // 后台 60s 探测周期里变化，不刷新的话要关开抽屉才能看到新状态。
 // 静默轮询(quiet):失败不弹错不打 loading，保持旧数据。
-watch(detailVisible, (visible) => {
-  window.clearInterval(detailPollTimer)
-  if (visible) {
-    detailPollTimer = window.setInterval(() => {
-      if (!document.hidden && detail.value && !detailLoading.value) {
-        void fetchDetail(detail.value.id, true)
-      }
-    }, 30000)
-  } else {
-    detailPollTimer = undefined
-  }
-})
-onUnmounted(() => window.clearInterval(detailPollTimer))
+// 抽屉打开期间轮询刷新(与列表同 30s):接口 up/延迟/状态等后台 60s 探测,
+// 挂在抽屉上看不到变化会误判卡死。统一走 usePolling(2026-10-31 收编):
+// 隐藏不发请求、恢复可见补一轮;fetchDetail 自带请求 id 去重。
+const { start: startDetailPolling, stop: stopDetailPolling } = usePolling(
+  () => {
+    if (detail.value && !detailLoading.value) {
+      return fetchDetail(detail.value.id, true).catch(() => {})
+    }
+    return undefined
+  },
+  { intervalMs: 30_000 },
+)
+watch(detailVisible, (visible) => (visible ? startDetailPolling() : stopDetailPolling()))
+onUnmounted(stopDetailPolling)
 
 async function fetchDetail(businessId: number, quiet = false) {
   const requestId = ++detailRequestId

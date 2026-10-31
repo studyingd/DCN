@@ -800,6 +800,7 @@ def _audit_container(target, success: bool, message: str) -> None:
                 action="start",
                 success=1 if success else 0,
                 message=(message or "")[:300],
+                source="auto_remediation",
             )
         )
         db.commit()

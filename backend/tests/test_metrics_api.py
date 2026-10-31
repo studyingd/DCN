@@ -16,7 +16,7 @@ from app.models.rack import Rack
 from app.models.role import Role
 from app.models.room import Room
 from app.models.user import User
-from app.routers.metrics import _trend_bucket_seconds
+from app.routers.metrics import _trend_bucket_seconds, reset_rack_map_cache
 from app.services.auth import create_access_token
 
 client = TestClient(app)
@@ -144,6 +144,9 @@ def setup_data():
     ]
     db.add_all(samples)
     db.commit()
+    # rack/room 元数据缓存(60s TTL)可能被先前用例的端点调用投毒,新建的
+    # Room/Rack 在旧缓存里不可见 → room_name 断言拿到空串。未用例前重置。
+    reset_rack_map_cache()
 
     statuses = {online_srv.id: "online", offline_host.id: "offline"}
     latest = {
@@ -185,9 +188,15 @@ def test_list_metrics(setup_data):
     assert resp.status_code == 200
     data = resp.json()
     # 测试库=开发库,列表里可能混有其它设备,只断言本测试创建的设备。
-    # Windows 且最近一次采集失败(available=False)的设备按新规则从列表剔除——
-    # 它对运维只有「WinRM 执行失败」噪声;offline_host 正是这个场景。
     items = {i["device_id"]: i for i in data["items"]}
+
+    # 掉线/采集失败的设备不再剔除(2026-10-31 用户拍板):保留行才能点进
+    # 历史曲线判断「是否负载过高压死」。available=False + error + status
+    # 由前端渲染离线灰显行。
+    offline = items[offline_host.id]
+    assert offline["available"] is False
+    assert offline["status"] == "offline"
+    assert offline["error"] == "设备离线"
 
     online = items[online_srv.id]
     assert online["available"] is True
@@ -199,7 +208,7 @@ def test_list_metrics(setup_data):
     assert online["room_id"] is not None
     assert online["rack_id"] is not None
 
-    assert offline_host.id not in items
+    assert offline_host.id in items
 
 
 def test_device_detail(setup_data):

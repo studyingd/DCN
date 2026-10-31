@@ -58,12 +58,14 @@ import type {
   MetricsTrend,
 } from '@/types/metrics'
 import type {
+  AgentActionApproval,
   AgentDevice,
   AgentStatus,
   AgentDiagnoseStart,
   AgentRunSummary,
   AgentRunDetail,
   AgentConfig,
+  PendingApprovalItem,
 } from '@/types/agent'
 import type {
   AutomationDevice,
@@ -863,11 +865,22 @@ export const agentAPI = {
     return api.get('/agent/devices')
   },
   diagnose(deviceId: number, question: string): Promise<{ data: AgentDiagnoseStart }> {
-    // 异步执行:立即返回 run_id,前端轮询 getRun 获取实时进度
+    // 异步执行:立即返回 run_id,前端轮询 getRun 获取实时进度;动作模式已删除
+    // (2026-10-30):后端固定 strict,写动作全人工审批
     return api.post('/agent/diagnose', { device_id: deviceId, question }, { timeout: 15000 })
   },
   getRun(runId: number): Promise<{ data: AgentRunDetail }> {
     return api.get(`/agent/runs/${runId}`)
+  },
+  approveAction(approvalId: number, note = ''): Promise<{ data: AgentActionApproval }> {
+    return api.post(`/agent/approvals/${approvalId}/approve`, { note })
+  },
+  rejectAction(approvalId: number, note = ''): Promise<{ data: AgentActionApproval }> {
+    return api.post(`/agent/approvals/${approvalId}/reject`, { note })
+  },
+  /** 待审批动作列表(顶栏徽标 30s 轮询,仅 automation:manage 可见) */
+  listApprovals(): Promise<{ data: { total: number; items: PendingApprovalItem[] } }> {
+    return api.get('/agent/approvals', { params: { status: 'pending' } })
   },
   listRuns(params?: {
     device_id?: number

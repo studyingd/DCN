@@ -68,6 +68,8 @@ html.dark,
   --dcn-focus-ring: #60a5fa;
   --dcn-rack-bg: #334155;
   --dcn-login-card-bg: rgba(17, 24, 39, 0.92);
+  /* 代码块/命令输出底色(比卡片底更深一档,自动化执行输出、Agent 步骤预览共用) */
+  --dcn-bg-code: #0a101d;
 
   /* ── Radius Scale ── */
   --dcn-radius-xs: 2px;
@@ -535,10 +537,9 @@ html.dark,
 .el-switch__core {
   border-color: var(--dcn-border-strong) !important;
 }
-.el-overlay {
-  backdrop-filter: blur(3px);
-}
-
+/* 注意:.el-overlay 不加 backdrop-filter——抽屉/弹窗的滑入动画期间
+   blur 会对整个底页逐帧重算,是打开卡顿的主因(2026-10-27 实测移除,
+   想要景深效果请换不随动画重算的方案,勿直接加回)。 */
 .el-popover.el-popper {
   background-color: var(--dcn-bg-card) !important;
   border: 1px solid var(--dcn-border) !important;

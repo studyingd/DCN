@@ -13,7 +13,7 @@
       "disks": [{"mount", "size_bytes", "used_bytes", "pct"}],
       "load1"/"load5"/"load15": float | None,   # 仅 Linux
       "uptime_sec": int | None,
-      "net_rx_bytes"/"net_tx_bytes": int | None,  # Linux 累计计数器(采集器跨周期求差)
+      "net_rx_bytes"/"net_tx_bytes": int | None,  # Linux 物理网卡累计计数器(采集器跨周期求差)
       "net_rx_bps"/"net_tx_bps": float | None,    # Windows 直读速率
       "diskio_read_bytes"/"diskio_write_bytes": int | None,  # Linux 累计计数器
       "disk_read_bps"/"disk_write_bps": float | None,        # Windows 直读速率
@@ -186,15 +186,27 @@ def _parse_linux_disks(lines: list[str]) -> list[dict]:
     return disks
 
 
-def _parse_linux_net(lines: list[str]) -> tuple[int | None, int | None]:
-    """/proc/net/dev → 物理网卡累计 (rx_bytes, tx_bytes)。"""
+def _parse_linux_net(
+    lines: list[str], physical: set[str]
+) -> tuple[int | None, int | None]:
+    """/proc/net/dev → 网卡累计 (rx_bytes, tx_bytes)。
+
+    ``physical`` 是 @@netphys 段给出的硬件网卡名集合(sysfs 有 device 链接)。
+    非空时只统计这些口:同一笔流量会同时出现在 bond/聚合口与成员物理口、
+    网桥与桥内物理口上,全量求和会翻倍;虚拟口承载的流量最终都经过物理口。
+    集合为空(无 sysfs 硬件口,典型如容器内全是 veth)时退回「除 lo 外
+    全量求和」的老口径。
+    """
     rx = tx = 0
     seen = False
     for line in lines:
         if "|" in line or ":" not in line:  # 跳过两行表头
             continue
         name, rest = line.split(":", 1)
-        if name.strip() == "lo":
+        name = name.strip()
+        if name == "lo":
+            continue
+        if physical and name not in physical:
             continue
         fields = rest.split()
         if len(fields) < 9:
@@ -267,7 +279,8 @@ def parse_linux_metrics(text: str) -> dict:
         if parts:
             result["uptime_sec"] = _to_int(parts[0])
 
-    rx, tx = _parse_linux_net(secs.get("net", []))
+    net_phys = {line.strip() for line in secs.get("netphys", []) if line.strip()}
+    rx, tx = _parse_linux_net(secs.get("net", []), net_phys)
     result["net_rx_bytes"] = rx
     result["net_tx_bytes"] = tx
 

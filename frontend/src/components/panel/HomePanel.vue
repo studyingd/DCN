@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { usePolling } from '@/composables/usePolling'
 import {
   ArrowRight,
   Bell,
@@ -151,7 +152,6 @@ const trendRange = ref<MetricsRange>('1h')
 const trendSeries = ref<DeviceMetricTrend[]>([])
 const trendLoading = ref(false)
 const trendError = ref('')
-let trendTimer: number | undefined
 let trendRequest: Promise<void> | null = null
 
 const trendDevices = computed(() => trendSeries.value.filter((item) => item.points.length > 0))
@@ -181,6 +181,7 @@ function buildTrendOption(metric: 'cpu_pct' | 'mem_pct') {
     color: TREND_COLORS,
     tooltip: {
       trigger: 'axis',
+      order: 'valueDesc',
       backgroundColor: '#111827',
       borderColor: '#223047',
       textStyle: { color: '#f1f5f9', fontSize: 12 },
@@ -270,17 +271,21 @@ function typeColor(type: string): string {
   return colors[type] || 'var(--dcn-primary)'
 }
 
+// 60s 趋势轮询统一走 usePolling(2026-10-31 收编);loadTrend 内部
+// try/catch(trendError)且带请求去重,轮询链不会中断
+const { start: startTrendPolling, stop: stopTrendPolling } = usePolling(() => loadTrend(), {
+  intervalMs: TREND_POLL_MS,
+})
+
 onMounted(() => {
   start()
   void loadTrend()
-  trendTimer = window.setInterval(() => {
-    if (!document.hidden) void loadTrend()
-  }, TREND_POLL_MS)
+  startTrendPolling()
 })
 
 onUnmounted(() => {
   stop()
-  window.clearInterval(trendTimer)
+  stopTrendPolling()
 })
 </script>
 

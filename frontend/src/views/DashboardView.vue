@@ -82,6 +82,17 @@
         </el-popover>
       </div>
       <div class="top-bar-right">
+        <el-badge
+          :value="pendingApprovalCount"
+          :hidden="pendingApprovalCount === 0"
+          :max="99"
+          type="warning"
+          class="approval-badge"
+        >
+          <button type="button" class="approval-bell" title="Agent 动作待审批,点击前往处理" @click="goAgentApprovals">
+            <el-icon :size="18"><Bell /></el-icon>
+          </button>
+        </el-badge>
         <el-dropdown trigger="click" @command="onUserCommand">
           <div class="user-avatar-btn">
             <el-icon :size="18"><UserFilled /></el-icon>
@@ -210,7 +221,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { Monitor, UserFilled, SwitchButton, Lock } from '@element-plus/icons-vue'
+import { Monitor, UserFilled, SwitchButton, Lock, Bell } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { useDeviceStore } from '@/stores/device'
 import { useRoomStore } from '@/stores/room'
@@ -222,12 +233,13 @@ const RoomsPanel = defineAsyncComponent(() => import('@/components/panel/RoomsPa
 const DeviceDetail = defineAsyncComponent(() => import('@/components/panel/DeviceDetail.vue'))
 const Scene2D = defineAsyncComponent(() => import('@/components/scene/Scene2D.vue'))
 const SystemPanel = defineAsyncComponent(() => import('@/components/panel/SystemPanel.vue'))
-const AutomationPanel = defineAsyncComponent(() => import('@/components/panel/AutomationPanel.vue'))
+const AutomationPanel = defineAsyncComponent(() => import('@/components/panel/automation/AutomationPanel.vue'))
 const ContainersPanel = defineAsyncComponent(() => import('@/components/panel/ContainersPanel.vue'))
 const BusinessPanel = defineAsyncComponent(() => import('@/components/panel/BusinessPanel.vue'))
 const AlertCenter = defineAsyncComponent(() => import('@/components/panel/AlertCenter.vue'))
 const PvePanel = defineAsyncComponent(() => import('@/components/panel/PvePanel.vue'))
 import { useDeviceMonitor } from '@/composables/useDeviceMonitor'
+import { usePendingApprovals } from '@/composables/usePendingApprovals'
 import { authAPI, searchAPI } from '@/api'
 import { ElMessage } from 'element-plus'
 import type { Room, Device } from '@/types'
@@ -282,6 +294,14 @@ const _initPanel = (() => {
   return 'home'
 })()
 const activePanel = ref<string>(_initPanel)
+
+// 顶栏「待审批」徽标:仅 automation:manage 用户会启动轮询(usePendingApprovals
+// 内部判断);点击切到自动化运维的智能诊断页处理审批。
+const { count: pendingApprovalCount } = usePendingApprovals()
+function goAgentApprovals() {
+  automationTab.value = 'agent-live'
+  activePanel.value = 'automation'
+}
 
 // 传给 NavTree 的激活键:子项为 面板:页签,普通项为面板名
 const activeNavKey = computed(() => {
@@ -765,6 +785,28 @@ async function handleLogout() {
 }
 .dot-maintenance {
   background: var(--dcn-dot-maintenance);
+}
+.approval-badge {
+  margin-right: 14px;
+}
+.approval-bell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--el-text-color-primary, #ddd);
+  cursor: pointer;
+}
+.approval-bell:hover {
+  background: rgba(128, 128, 128, 0.18);
+}
+.top-bar-right {
+  display: flex;
+  align-items: center;
 }
 .user-avatar-btn {
   display: flex;

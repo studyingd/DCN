@@ -8,6 +8,7 @@
 
 import pytest
 
+from app.services import agent_commands as ac
 from app.services.agent_commands import (
     LINUX_DIAGNOSTICS,
     WINDOWS_DIAGNOSTICS,
@@ -51,6 +52,9 @@ def test_all_registry_entries_pass_readonly_check():
         "iptables -A INPUT -j DROP",
         "ufw disable",
         "mount /dev/sdb1 /mnt",
+        # 无空格分隔符的真实写命令也必须拒(边界收紧后约回归)
+        "echo hi;rm -rf /tmp",
+        "echo hi&&mv /tmp/a /tmp/b",
     ],
 )
 def test_shell_write_commands_rejected(cmd):
@@ -120,10 +124,29 @@ def test_ps_write_commands_rejected(cmd):
             "Get-HotFix | Sort-Object InstalledOn -Descending | Format-Table -AutoSize",
             "ps",
         ),
+        # 参数位名字/路径含形似写原语的片段不误伤(run 893:容器名 document-sync-worker
+        # 的 sync 被 \b 切成独立词误拒;同类的 restart-worker/curl-proxy/rm-backup)
+        ("docker inspect argus-production-document-sync-worker-1", "sh"),
+        ("docker logs --tail 40 file-sync-worker-1", "sh"),
+        ("ls -la /data/sync", "sh"),
+        ("cat /data/rm-backup/config.yaml", "sh"),
+        ("docker logs --tail 40 curl-proxy-1", "ps"),
     ],
 )
 def test_legit_readonly_commands_pass(cmd, shell):
     assert_readonly(cmd, shell)  # 不抛异常即通过
+
+
+def test_docker_processes_degrades_without_ps():
+    """run 复盘(7/7 误报):精简镜像容器内无 ps,docker exec 非零退出曾把整步
+    拖成 ok:false——PID1 半段证据其实已到手。进程段必须降级为文本标注,
+    不让单容器缺 ps 决定整步成败。"""
+    cmd = ac.LINUX_DIAGNOSTICS["docker_processes"]["command"]
+    assert "|| echo [no ps in $1" in cmd  # 缺 ps 降级标注(免引号文本)
+    # 逐容器执行必须经 sh -c 定位参数($1),容器名不内插进脚本体
+    assert "sh -c" in cmd and "sh {}" in cmd
+    # 模板整体仍过只读屏(注册期同款校验)
+    assert_readonly(cmd, "sh")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -208,3 +231,37 @@ def test_windows_system_info_uses_fast_cim():
     assert "Get-CimInstance" in command
     assert "systeminfo" not in command
     assert WINDOWS_DIAGNOSTICS["system_info"]["timeout"] <= 15
+
+
+def test_process_list_pinned_commands():
+    """全量进程清单:免审固定项(2026-10-30 批次 A)。命令钉死——
+    Windows tasklist 无命令行列无敏感参数;Linux 用 comm 不用 args
+    (进程参数可能带口令),两者都只提供名称↔PID 映射。"""
+    assert WINDOWS_DIAGNOSTICS["process_list"]["command"] == "tasklist /FO CSV /NH"
+    assert (
+        LINUX_DIAGNOSTICS["process_list"]["command"]
+        == "ps -eo pid,user,pcpu,pmem,comm --sort=pid"
+    )
+
+
+def test_messages_error_count_covers_rhel_and_debian_paths():
+    """文件式日志错误计数:RHEL(messages)与 Debian(syslog)双路径,
+    取首条可读文件;journalctl 持久化缺失时兑底 app_errors。"""
+    cmd = LINUX_DIAGNOSTICS["messages_error_count"]["command"]
+    assert "/var/log/messages" in cmd
+    assert "/var/log/syslog" in cmd
+    assert "grep -icE" in cmd
+    assert "messages_error_count" not in WINDOWS_DIAGNOSTICS
+
+
+def test_docker_readonly_inventory_items_pinned():
+    """docker 只读指令梳理(2026-10-30 第三批):镜像/网络清单为固定项,
+    两侧平台都有守卫(未装 Docker 输出提示而不是报错)。"""
+    for table, guard in (
+        (LINUX_DIAGNOSTICS, "command -v docker"),
+        (WINDOWS_DIAGNOSTICS, "Get-Command docker"),
+    ):
+        assert "docker images --format" in table["docker_images"]["command"]
+        assert "docker network ls" in table["docker_network_ls"]["command"]
+        assert guard in table["docker_images"]["command"]
+        assert guard in table["docker_network_ls"]["command"]

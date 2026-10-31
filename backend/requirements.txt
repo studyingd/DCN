@@ -31,6 +31,10 @@ slowapi==0.1.10
 # slowapi 的限流窗口/存储由 limits 实现，行为差异会直接影响限流正确性。
 limits==5.8.0
 python-dotenv==1.2.3
+# Windows 本地开发必需:Python 在 Windows 上没有系统时区库,缺它时
+# ZoneInfo('Asia/Shanghai') 抛错、飞书卡片时间错 8 小时;Linux/Docker 有
+# /usr/share/zoneinfo,zoneinfo 优先用系统库,装了也不参与。
+tzdata==2026.5
 cryptography==50.0.1
 alembic==1.19.2
 pydantic==2.13.5

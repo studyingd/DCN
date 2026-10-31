@@ -67,8 +67,16 @@ async def _check_and_run_due_automation_schedules(loop):
             )
             .all()
         )
+        # 批量预取 owner(2026-10-31 修 N+1:循环内逐条查 User),计划数少但
+        # 每轮扫描都跑一次,一次 IN 查询拿全
+        owner_ids = {s.created_by for s in schedules if s.created_by}
+        owners_by_id = (
+            {u.id: u for u in db.query(User).filter(User.id.in_(owner_ids)).all()}
+            if owner_ids
+            else {}
+        )
         for schedule in schedules:
-            owner = db.query(User).filter(User.id == schedule.created_by).first()
+            owner = owners_by_id.get(schedule.created_by)
             permission = {
                 "agent": "device:remote",
                 "inspection": "automation:manage",

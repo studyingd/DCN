@@ -111,6 +111,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { usePolling } from '@/composables/usePolling'
 import { Monitor, Link } from '@element-plus/icons-vue'
 import { useDeviceStore } from '@/stores/device'
 import { useAuthStore } from '@/stores/auth'
@@ -165,7 +166,7 @@ const statusLabel = computed(() => {
 const isServerDevice = computed(() => isOpsDevice(device.value?.type))
 
 const metrics = ref<MetricsDeviceDetail | null>(null)
-let metricsTimer: number | undefined
+// (metricsTimer 已随 usePolling 收编删除,2026-10-31)
 let metricsInFlight = false
 // 阈值配色:按指标查后端下发的阈值表,表还没到位时回退统一 70/90
 const metricColor = useMetricColor()
@@ -192,11 +193,17 @@ watch(
   },
 )
 
+// 30s 指标轮询统一走 usePolling(2026-10-31 收编);loadMetrics 内部
+// try/catch,轮询链不会中断
+const { start: startMetricsPolling, stop: stopMetricsPolling } = usePolling(() => loadMetrics(), {
+  intervalMs: 30_000,
+})
+
 onMounted(() => {
   loadMetrics()
-  metricsTimer = window.setInterval(loadMetrics, 30000)
+  startMetricsPolling()
 })
-onUnmounted(() => window.clearInterval(metricsTimer))
+onUnmounted(stopMetricsPolling)
 
 const metricBars = computed(() => {
   if (!metrics.value) return []

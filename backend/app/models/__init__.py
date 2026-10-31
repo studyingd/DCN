@@ -1,3 +1,4 @@
+from app.models.agent_action_approval import AgentActionApproval  # noqa: F401
 from app.models.agent_run import AgentRun  # noqa: F401
 from app.models.alert import AlertEvent, AlertRule  # noqa: F401
 from app.models.automation import (  # noqa: F401
@@ -49,6 +50,7 @@ __all__ = [
     "DeviceDockerStatus",
     "ContainerAction",
     "AgentRun",
+    "AgentActionApproval",
     "AlertRule",
     "AlertEvent",
     "AutomationJob",

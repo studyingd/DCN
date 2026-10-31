@@ -7,6 +7,9 @@ LLM 自由文本永远不进 shell;每次诊断落 agent_runs 审计。
 API Key 加密存储、接口只回显掩码。
 """
 
+import json
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
@@ -14,16 +17,21 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.middleware.rate_limiter import limiter
+from app.models.agent_action_approval import AgentActionApproval
 from app.models.agent_run import AgentRun
 from app.models.device import OPS_TARGET_TYPES, Device
 from app.models.user import User
-from app.services.agent import get_agent_config, start_diagnosis
+from app.services.agent import decide_approval, get_agent_config, start_diagnosis
 from app.services.agent_commands import get_diagnostics_for_device
+from app.services.automation import create_job_record, finish_agent_job
+from app.services.containers_collector import decode_pve_target_id
 from app.services.crypto import encrypt
 from app.services.permissions import (
     get_user_device_ids,
+    get_user_pve_guest_keys,
     require_permission,
     user_can_access_device,
+    user_can_access_pve_vmid,
 )
 from app.services.settings import get_setting, set_setting
 from app.validators import validate_outbound_url
@@ -34,6 +42,8 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 class DiagnoseRequest(BaseModel):
     device_id: int
     question: str = Field(min_length=2, max_length=500)
+    # 动作模式已删除(2026-10-30 用户定调):不再分只读/标准/严格,手动诊断
+    # 固定 strict;旧前端请求体里的 mode 字段会被忽略。
 
 
 def _get_device_checked(device_id: int, db: Session, user: User) -> Device:
@@ -75,14 +85,15 @@ def list_agent_devices(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("device:remote")),
 ):
-    """Agent 可诊断的设备(纳管类型,RBAC 过滤)。"""
+    """Agent 可诊断目标(RBAC 过滤):机房设备 + PVE 虚机(合并入口后统一从
+    智能诊断发起;虚机候选来自内存快照,与业务/角色候选同源)。"""
     query = (
         db.query(Device).filter(Device.type.in_(OPS_TARGET_TYPES)).order_by(Device.name)
     )
     allowed_ids = get_user_device_ids(current_user, db)
     if allowed_ids is not None:
         query = query.filter(Device.id.in_(allowed_ids))
-    return [
+    items = [
         {
             "id": d.id,
             "name": d.name,
@@ -90,9 +101,28 @@ def list_agent_devices(
             "os_system": d.os_system,
             "status": d.status,
             "has_credential": d.has_credential,
+            "kind": "device",
         }
         for d in query.all()
     ]
+    allowed_guests = get_user_pve_guest_keys(current_user, db)
+    from app.services.containers_collector import pve_target_id
+    from app.services.pve_guest_candidates import collect_pve_guest_candidates
+
+    for g in collect_pve_guest_candidates(db, allowed_guests):
+        items.append(
+            {
+                "id": pve_target_id(g["connection_id"], g["vmid"]),
+                "name": f"[{g['connection_name']}] {g['name']}",
+                "ip_address": g["ip_address"],
+                "os_system": g["os_system"],
+                "status": "online" if g["status"] == "running" else "offline",
+                # 虚机有运维绑定(IP 是绑定存在的代理信号)才有凭据入口
+                "has_credential": g["ip_address"] is not None,
+                "kind": "pve_guest",
+            }
+        )
+    return items
 
 
 @router.get("/catalog/{device_id}")
@@ -111,6 +141,48 @@ def get_catalog(
     }
 
 
+def _resolve_diagnose_target(
+    device_id: int, db: Session, current_user: User
+) -> Device | object:
+    """诊断目标解析:正数=设备行(原有路径);负数=PVE 虚机合成 id,经
+    运维绑定转成运行时目标(AgentTarget,凭据在绑定行里)。"""
+    if device_id >= 0:
+        return _get_device_checked(device_id, db, current_user)
+    from app.services.automation import _pve_runtime_device
+    from app.services.containers_collector import decode_pve_target_id
+
+    decoded = decode_pve_target_id(device_id)
+    if decoded is None:
+        raise HTTPException(status_code=404, detail="虚机目标不存在")
+    connection_id, vmid = decoded
+    if not user_can_access_pve_vmid(current_user, db, connection_id, vmid):
+        raise HTTPException(status_code=403, detail="无权诊断该虚拟机")
+    from types import SimpleNamespace
+
+    # 虚机显示名取内存快照(与 /api/agent/devices 候选同源);快照缺失
+    # (如刚重启未刷新)回退 VM {vmid}。device_name 是 _pve_runtime_device
+    # 拼装 AgentTarget 的必要字段——漏掉会 500(2026-10-30 实测)。
+    from app.services.pve_guest_status import get_guests_by_connection
+
+    snap = get_guests_by_connection(connection_id).get(vmid)
+    guest_name = str(snap.get("name") or "") if snap else ""
+
+    target = _pve_runtime_device(
+        SimpleNamespace(
+            pve_connection_id=connection_id,
+            pve_guest_type="qemu",
+            pve_vmid=vmid,
+            device_name=guest_name or f"VM {vmid}",
+        )
+    )
+    if target is None:
+        raise HTTPException(
+            status_code=400,
+            detail="该虚拟机未配置运维接入(绑定用户名/密码或密钥),无法诊断",
+        )
+    return target
+
+
 @router.post("/diagnose")
 # 一次诊断会拉起 LLM + SSH、最多 AGENT_MAX_STEPS 步、等待上限 300s，是全平台最贵的
 # 单次操作。全局默认 100/minute 对它太宽松(100 次/分钟足以打满诊断线程池和 LLM 配额)，
@@ -122,15 +194,72 @@ def diagnose(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("device:remote")),
 ):
-    """发起一次只读诊断——立即返回 run_id,后台线程执行,
+    """发起一次分析诊断——立即返回 run_id,后台线程执行,
     前端轮询 GET /runs/{id} 获取实时步骤与最终报告。"""
     cfg = _check_ready(db)
-    device = _get_device_checked(body.device_id, db, current_user)
+    device = _resolve_diagnose_target(body.device_id, db, current_user)
     if not device.ip_address:
         raise HTTPException(status_code=400, detail="设备未配置 IP 地址")
 
-    run_id = start_diagnosis(device, body.question.strip(), current_user.id, cfg)
-    return {"run_id": run_id, "status": "running"}
+    # 动作模式固定 strict(2026-10-30 用户定调,不再分模式):白名单只读取证
+    # 自动执行,所有写动作(含拉起类 L1)一律人工审批后才执行。发起权限保持
+    # device:remote——写操作的安全边界在审批闸门(approvals 需
+    # automation:manage+设备 ACL),不在发起侧。
+    mode = "strict"
+
+    # 统一执行记录入口(2026-10-30):实时诊断同步落一条 agent 任务记录,
+    # 执行记录/概览统计与其它三类任务同一入口可见;run 终态由
+    # start_diagnosis/_execute_run 回写任务状态(服务重启由
+    # recover_interrupted_jobs 兑底)。模式固定 strict,风险等级恒 high。
+    question = body.question.strip()
+    pve_decoded = decode_pve_target_id(body.device_id) if body.device_id < 0 else None
+    job = create_job_record(
+        db,
+        name=(question[:80] or "Agent 分析诊断"),
+        job_type="agent",
+        device_ids=[] if pve_decoded else [device.id],
+        pve_targets=None
+        if not pve_decoded
+        else [
+            {
+                "connection_id": pve_decoded[0],
+                "vmid": pve_decoded[1],
+                "guest_type": "qemu",
+                "name": getattr(device, "name", "") or f"PVE VM {pve_decoded[1]}",
+            }
+        ],
+        config={"question": question, "user_id": current_user.id, "mode": mode},
+        user_id=current_user.id,
+        user_name=current_user.display_name or current_user.username,
+        risk_level="high",
+    )
+    target = job.targets[0]
+    now = datetime.now(timezone.utc)
+    job.status = "running"
+    job.started_at = now
+    target.status = "running"
+    target.started_at = now
+    db.commit()
+
+    try:
+        run_id = start_diagnosis(
+            device,
+            question,
+            current_user.id,
+            cfg,
+            mode=mode,
+            job_id=job.id,
+            job_target_id=target.id,
+        )
+    except Exception as exc:
+        finish_agent_job(job.id, target.id, "failed", {}, f"诊断启动失败: {exc}")
+        raise
+    return {
+        "run_id": run_id,
+        "status": "running",
+        "mode": mode,
+        "job_id": job.id,
+    }
 
 
 # ── Agent 参数配置(系统管理页;settings:manage)──
@@ -271,7 +400,7 @@ def get_run(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("device:remote")),
 ):
-    """单次诊断详情(含实时步骤)——诊断进行中前端轮询此接口。"""
+    """单次诊断详情(含实时步骤与审批)——诊断进行中前端轮询此接口。"""
     run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="诊断记录不存在")
@@ -281,14 +410,19 @@ def get_run(
     ):
         raise HTTPException(status_code=403, detail="无权查看该诊断记录")
 
-    import json as _json
-
     steps = []
     if run.steps_json:
         try:
-            steps = _json.loads(run.steps_json)
+            steps = json.loads(run.steps_json)
         except ValueError:
             steps = []
+
+    approvals = (
+        db.query(AgentActionApproval)
+        .filter(AgentActionApproval.run_id == run_id)
+        .order_by(AgentActionApproval.id)
+        .all()
+    )
 
     return {
         "id": run.id,
@@ -297,12 +431,126 @@ def get_run(
         "device_ip": run.device_ip,
         "question": run.question,
         "status": run.status,
+        "mode": run.mode,
         "report": run.report,
         "error": run.error,
         "steps": steps,
+        "approvals": [_approval_view(a) for a in approvals],
         "duration_ms": run.duration_ms,
         "created_at": run.created_at.isoformat() if run.created_at else None,
     }
+
+
+def _approval_view(a: AgentActionApproval) -> dict:
+    try:
+        params = json.loads(a.params_json) if a.params_json else {}
+    except ValueError:
+        params = {}
+    return {
+        "id": a.id,
+        "run_id": a.run_id,
+        "action_key": a.action_key,
+        "params": params,
+        "command": a.command,
+        "risk_level": a.risk_level,
+        "reason": a.reason,
+        "status": a.status,
+        "requested_at": a.requested_at.isoformat() if a.requested_at else None,
+        "expires_at": a.expires_at.isoformat() if a.expires_at else None,
+        "decided_at": a.decided_at.isoformat() if a.decided_at else None,
+        "decided_by": a.decided_by,
+        "decision_note": a.decision_note,
+        "output": (a.output or "")[:2000],
+        "executed_at": a.executed_at.isoformat() if a.executed_at else None,
+    }
+
+
+class ApprovalDecisionBody(BaseModel):
+    note: str = Field(default="", max_length=500)
+
+
+def _load_approval_checked(
+    approval_id: int, db: Session, current_user: User
+) -> tuple[AgentActionApproval, AgentRun | None]:
+    approval = (
+        db.query(AgentActionApproval)
+        .filter(AgentActionApproval.id == approval_id)
+        .first()
+    )
+    if not approval:
+        raise HTTPException(status_code=404, detail="审批记录不存在")
+    run = (
+        db.query(AgentRun).filter(AgentRun.id == approval.run_id).first()
+        if approval.run_id
+        else None
+    )
+    if (
+        run
+        and run.device_id is not None
+        and not user_can_access_device(current_user, run.device_id, db)
+    ):
+        raise HTTPException(status_code=403, detail="无权审批该设备的动作")
+    return approval, run
+
+
+@router.get("/approvals")
+def list_pending_approvals(
+    status: str = "pending",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("automation:manage")),
+):
+    """待审批动作列表(顶栏徽标 30s 轮询)。只支持 pending 查询——
+    历史审批随 run 详情(approvals 数组)走,这里不重复。"""
+    if status != "pending":
+        raise HTTPException(status_code=422, detail="仅支持 status=pending")
+    rows = (
+        db.query(AgentActionApproval)
+        .filter(AgentActionApproval.status == "pending")
+        .order_by(AgentActionApproval.id.desc())
+        .limit(50)
+        .all()
+    )
+    items = []
+    for a in rows:
+        run = (
+            db.query(AgentRun).filter(AgentRun.id == a.run_id).first()
+            if a.run_id
+            else None
+        )
+        item = _approval_view(a)
+        item["device_name"] = run.device_name if run else None
+        item["run_status"] = run.status if run else None
+        items.append(item)
+    return {"total": len(items), "items": items}
+
+
+@router.post("/approvals/{approval_id}/approve")
+def approve_action(
+    approval_id: int,
+    body: ApprovalDecisionBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("automation:manage")),
+):
+    """批准一个待审批动作——执行由挂起的诊断线程完成(SSH 会话在它手里)。"""
+    _load_approval_checked(approval_id, db, current_user)
+    row = decide_approval(db, approval_id, True, current_user.id, body.note)
+    if row is None:
+        raise HTTPException(status_code=409, detail="该审批已不在待决策状态")
+    return _approval_view(row)
+
+
+@router.post("/approvals/{approval_id}/reject")
+def reject_action(
+    approval_id: int,
+    body: ApprovalDecisionBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("automation:manage")),
+):
+    _load_approval_checked(approval_id, db, current_user)
+    row = decide_approval(db, approval_id, False, current_user.id, body.note)
+    if row is None:
+        raise HTTPException(status_code=409, detail="该审批已不在待决策状态")
+    return _approval_view(row)
 
 
 @router.get("/runs")
@@ -332,6 +580,16 @@ def list_runs(
 
     total = query.count()
     rows = query.offset((page - 1) * page_size).limit(page_size).all()
+    # 有待审批动作的 run 打标(列表页高亮/顶栏徽标轮询共用同一口径)
+    pending_run_ids = {
+        rid
+        for (rid,) in db.query(AgentActionApproval.run_id)
+        .filter(
+            AgentActionApproval.status == "pending",
+            AgentActionApproval.run_id.isnot(None),
+        )
+        .all()
+    }
     return {
         "total": total,
         "items": [
@@ -342,6 +600,8 @@ def list_runs(
                 "device_ip": r.device_ip,
                 "question": r.question,
                 "status": r.status,
+                "mode": r.mode,
+                "waiting_approval": r.id in pending_run_ids,
                 "duration_ms": r.duration_ms,
                 "report": r.report,
                 "error": r.error,

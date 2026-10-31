@@ -73,13 +73,15 @@ def create_job_record(
     user_name: str | None,
     trigger_type: str = "manual",
     pve_targets: list[dict[str, Any]] | None = None,
+    risk_level: str | None = None,
 ) -> AutomationJob:
     job = AutomationJob(
         name=name.strip(),
         job_type=job_type,
         trigger_type=trigger_type,
         status="pending",
-        risk_level={
+        risk_level=risk_level
+        or {
             "agent": "read_only",
             "inspection": "read_only",
             "script": "high",
@@ -172,6 +174,57 @@ def _finish_target(
                 if start.tzinfo is None:
                     start = start.replace(tzinfo=timezone.utc)
                 target.duration_ms = int((finished - start).total_seconds() * 1000)
+            db.commit()
+    finally:
+        db.close()
+
+
+def _apply_job_summary(job: AutomationJob) -> None:
+    """按 targets 终态汇总 job 状态/summary/finished_at(批次收尾与
+    实时诊断联动两处共用;调用方负责 commit)。"""
+    statuses = [target.status for target in job.targets]
+    succeeded = sum(status == "completed" for status in statuses)
+    warnings = sum(status == "warning" for status in statuses)
+    failed = sum(status == "failed" for status in statuses)
+    if failed == len(statuses):
+        job.status = "failed"
+    elif failed or warnings:
+        job.status = "partial"
+    else:
+        job.status = "completed"
+    job.summary_json = {
+        "total": len(statuses),
+        "succeeded": succeeded,
+        "warnings": warnings,
+        "failed": failed,
+    }
+    job.finished_at = _utcnow()
+
+
+def link_agent_run(target_id: int, run_id: int) -> None:
+    """实时诊断发起时预写 run 链接(2026-10-30 统一执行记录入口):
+    任务详情抽屉在运行中就能打开时间线(终态时被 finish_agent_job 覆写)。"""
+    db = SessionLocal()
+    try:
+        target = db.query(AutomationJobTarget).filter_by(id=target_id).first()
+        if target:
+            target.result_json = {"legacy_run_id": run_id}
+            db.commit()
+    finally:
+        db.close()
+
+
+def finish_agent_job(
+    job_id: int, target_id: int, status: str, result: dict[str, Any], error: str | None
+) -> None:
+    """实时诊断 run 终态后同步任务记录:目标写终态结果(含 legacy_run_id
+    供时间线跳转),job 按 targets 汇总收尾。"""
+    _finish_target(target_id, status, result, error)
+    db = SessionLocal()
+    try:
+        job = db.query(AutomationJob).filter_by(id=job_id).first()
+        if job and job.status in ("pending", "running"):
+            _apply_job_summary(job)
             db.commit()
     finally:
         db.close()
@@ -608,23 +661,7 @@ def _execute_job(job_id: int) -> None:
         job = db.query(AutomationJob).filter_by(id=job_id).first()
         if not job:
             return
-        statuses = [target.status for target in job.targets]
-        succeeded = sum(status == "completed" for status in statuses)
-        warnings = sum(status == "warning" for status in statuses)
-        failed = sum(status == "failed" for status in statuses)
-        if failed == len(statuses):
-            job.status = "failed"
-        elif failed or warnings:
-            job.status = "partial"
-        else:
-            job.status = "completed"
-        job.summary_json = {
-            "total": len(statuses),
-            "succeeded": succeeded,
-            "warnings": warnings,
-            "failed": failed,
-        }
-        job.finished_at = _utcnow()
+        _apply_job_summary(job)
         db.commit()
         # 巡检报告投递：必须放在 commit 之后（报告要读 job.finished_at 与
         # 各 target 的 result_json），且绝不能让投递失败反过来影响任务状态。

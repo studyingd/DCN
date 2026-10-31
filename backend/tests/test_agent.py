@@ -214,11 +214,51 @@ def test_agent_catalog_is_narrowed_for_specific_questions(device):
         "docker_processes",
         "docker_logs",
         "docker_stats",
+        # 参数化原语(2026-10-24):同组随选,指定容器完整日志
+        "docker_logs_container",
+        # docker 只读指令梳理(第三/四批):inspect/镜像/网络/容器内读文件
+        "docker_inspect_container",
+        "docker_images",
+        "docker_network_ls",
+        "docker_exec_read",
     }
 
     prompt = agent_service._build_system_prompt({"traefik_routes": {"label": "x"}})
     assert "Traefik 专项规则" in prompt
     assert "已观测事实" in prompt
+
+
+def test_catalog_groups_process_list_and_log_paths(device):
+    """免审固定项(2026-10-30 批次 A):进程清单/文件式日志错误随问题分组可见。
+
+    起因:run 580 里 LLM 只拿到 listening_ports(有 PID 无进程名),
+    只能走 custom_read 提议 tasklist 进审批;固化后「应用/程序/端口/
+    日志」类问题直接看到 process_list/messages_error_count。
+    """
+    catalog = agent_service._select_catalog(device, "正在运行的应用有哪些")
+    assert "process_list" in catalog
+    assert "ps_filter" in catalog
+    # 应用盘点类问题:容器观测项是目录内项(run 782 后定调),不再挤补充预算
+    assert "docker_runtime" in catalog
+    assert "docker_stats" in catalog
+    assert "docker_logs_container" in catalog
+    # docker 只读指令梳理(run 843 后第三批):inspect/镜像/网络也进目录
+    assert "docker_inspect_container" in catalog
+    assert "docker_images" in catalog
+    assert "docker_network_ls" in catalog
+
+    # 纯「进程」问题不带容器项:防借机扫容器
+    catalog = agent_service._select_catalog(device, "哪个进程占用内存高")
+    assert "docker_runtime" not in catalog
+    assert "top_processes_mem" in catalog
+
+    catalog = agent_service._select_catalog(device, "看看监听端口对应什么程序")
+    assert "process_list" in catalog
+    assert "listening_ports" in catalog
+
+    catalog = agent_service._select_catalog(device, "系统日志有报错吗")
+    assert "messages_error_count" in catalog
+    assert "app_errors" in catalog
 
 
 def test_agent_rejects_duplicate_diagnostic(device):
@@ -246,6 +286,128 @@ def test_agent_rejects_duplicate_diagnostic(device):
 
     assert calls == ["free -m"]
     assert "无需重复执行" in result
+    assert steps[-1]["ok"] is False
+
+
+def test_agent_supplemental_registry_items_callable(device):
+    """关键词收窄不是可执行边界(2026-10-30,run 664):目录外的注册只读项
+    允许按需调用(免审白名单项不能因问题措辞没被选中就不可调用,否则 LLM
+    只能退到 custom_read 自写命令进审批);幻觉 key 仍拒绝。"""
+    steps: list[dict] = []
+    calls: list[str] = []
+
+    def fake_exec(db, dev, command, timeout, session=None):
+        calls.append(command)
+        return 0, "ok", ""
+
+    with patch.object(agent_service, "_exec_diagnostic", side_effect=fake_exec):
+        catalog = agent_service._select_catalog(device, "查询内存")
+        assert "listening_ports" not in catalog
+        call = {
+            "function": {
+                "name": "run_diagnostic",
+                "arguments": json.dumps({"key": "listening_ports"}),
+            }
+        }
+        result = agent_service._dispatch(None, device, catalog, call, steps, set(), 5)
+        assert calls == ["ss -tlnp"]
+        assert "不存在" not in result
+
+        bad = {
+            "function": {
+                "name": "run_diagnostic",
+                "arguments": json.dumps({"key": "definitely_not_a_key"}),
+            }
+        }
+        result2 = agent_service._dispatch(None, device, catalog, bad, steps, set(), 5)
+        assert "不存在" in result2
+        assert calls == ["ss -tlnp"]
+
+
+def test_supplemental_items_have_own_budget(device):
+    """预算分道(2026-10-30 用户实测):目录预算用满后补充项仍可用——否则
+    兑底通道被掐死;但补充项自身限 3 项,目录内超预算仍拒。"""
+    steps: list[dict] = []
+    calls: list[str] = []
+
+    def fake_exec(db, dev, command, timeout, session=None):
+        calls.append(command)
+        return 0, "ok", ""
+
+    def call_for(key, params=None):
+        payload = {"key": key}
+        if params is not None:
+            payload["params"] = params
+        return {
+            "function": {
+                "name": "run_diagnostic",
+                "arguments": json.dumps(payload),
+            }
+        }
+
+    with patch.object(agent_service, "_exec_diagnostic", side_effect=fake_exec):
+        full = agent_service._full_catalog(device)
+        catalog = {
+            "memory": full["memory"],
+            "ps_filter": full["ps_filter"],
+        }
+        executed: set[str] = set()
+        # 填满目录预算(2):memory + ps_filter(两个参数变体各算一项)
+        agent_service._dispatch(
+            None, device, catalog, call_for("memory"), steps, executed, 2
+        )
+        agent_service._dispatch(
+            None,
+            device,
+            catalog,
+            call_for("ps_filter", {"pattern": "nginx"}),
+            steps,
+            executed,
+            2,
+        )
+        # 目录内超预算:第二个参数变体被拒(预算 2 已满)
+        r_full = agent_service._dispatch(
+            None,
+            device,
+            catalog,
+            call_for("ps_filter", {"pattern": "docker"}),
+            steps,
+            executed,
+            2,
+        )
+        assert "具体问题最多执行 2 项" in r_full
+        # 补充项不受目录预算影响:5 项都放行
+        for key in (
+            "listening_ports",
+            "disk",
+            "network",
+            "load_uptime",
+            "established_top",
+        ):
+            r_sup = agent_service._dispatch(
+                None, device, catalog, call_for(key), steps, executed, 2
+            )
+            assert "最多执行" not in r_sup, key
+        # 第 6 个补充项被独立预算拦住
+        r_over = agent_service._dispatch(
+            None, device, catalog, call_for("kernel_errors"), steps, executed, 2
+        )
+        assert "补充只读项最多执行 5 项" in r_over
+
+
+def test_run_diagnostic_rejects_action_key_with_guidance(device):
+    """动作 key 误用 run_diagnostic(run 782:LLM 想借它调 custom_read 绕
+    审批):拒绝同时给出正确通道提示,让下一轮自纠。"""
+    steps: list[dict] = []
+    call = {
+        "function": {
+            "name": "run_diagnostic",
+            "arguments": json.dumps({"key": "custom_read"}),
+        }
+    }
+    result = agent_service._dispatch(None, device, {}, call, steps, set(), 5)
+    assert "不存在" in result
+    assert "run_action" in result
     assert steps[-1]["ok"] is False
 
 
@@ -1162,9 +1324,11 @@ def test_metrics_summary_for_vm_target_reads_pve_history(device):
         {"ts": now - 5, "cpu": 0.50, "mem": 3, "maxmem": 4, "status": "running"},
     ]
     db = SessionLocal()
+    from app.services import agent_metrics
+
     try:
         with patch.object(
-            agent_service, "get_guest_metric_history", return_value=samples
+            agent_metrics, "get_guest_metric_history", return_value=samples
         ):
             summary = json.loads(agent_service._metrics_summary(db, target, 1))
         assert summary["samples"] == 3

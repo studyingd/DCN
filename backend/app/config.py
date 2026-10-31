@@ -223,6 +223,16 @@ AUTOMATION_MAX_CONCURRENT_TARGETS = int(
 # 一次抖动不再把已采完证据的整轮诊断作废。
 AGENT_LLM_MAX_RETRIES = int(os.getenv("AGENT_LLM_MAX_RETRIES", "2"))
 
+# ── Agent 分级动作(2026-10-25):L1「恢复方向」写曾可免审自动(standard),
+# 2026-10-30 起手动诊断不再分模式、固定 strict——写动作全审批(含拉起类 L1)。
+# settings 键 agent_action_mode_default / agent_action_l1_enabled 已无消费方
+# (引擎 _loop 保留模式参数供内部路径,但不再有 standard 入口)。
+# 这里的三个旋钮不进 UI:审批等待上限、单次运行动作总数上限、
+# 单次运行审批次数上限(超限按拒绝处理)。
+AGENT_ACTION_APPROVAL_TIMEOUT = int(os.getenv("AGENT_ACTION_APPROVAL_TIMEOUT", "600"))
+AGENT_ACTION_LIMIT = int(os.getenv("AGENT_ACTION_LIMIT", "5"))
+AGENT_ACTION_APPROVAL_LIMIT = int(os.getenv("AGENT_ACTION_APPROVAL_LIMIT", "3"))
+
 # 告警自愈:主机离线时若目标是 PVE 虚拟机/LXC 或 Docker 容器，自动下发启动指令;
 # 指标过高时自动调用 Agent 做只读归因分析。两者都只在对应告警规则触发后执行，
 # 规则本身就是用户的显式授权;可用下面的开关单独关闭。

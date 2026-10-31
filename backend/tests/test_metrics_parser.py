@@ -85,6 +85,35 @@ def test_linux_partial_sections_ok():
     assert r["cpu_pct"] is None
 
 
+def test_linux_net_physical_only_dedup():
+    """@@netphys 段存在时只统计物理口:bond0/网桥与成员口是同一笔流量,不翻倍。"""
+    text = LINUX_SAMPLE.replace(
+        "@@net\n",
+        "@@netphys\neth0\n@@net\n",
+    ).replace(
+        "  eth0: 1000000 100 0 0 0 0 0 0 2000000 200 0 0 0 0 0 0\n",
+        "  eth0: 1000000 100 0 0 0 0 0 0 2000000 200 0 0 0 0 0 0\n"
+        " bond0: 1000000 100 0 0 0 0 0 0 2000000 200 0 0 0 0 0 0\n"
+        " veth123: 500 5 0 0 0 0 0 0 500 5 0 0 0 0 0 0\n",
+    )
+    r = parse_linux_metrics(text)
+    # bond0(聚合口,流量来自成员 eth0)与 veth123(虚拟口)都不计
+    assert r["net_rx_bytes"] == 1000000
+    assert r["net_tx_bytes"] == 2000000
+
+
+def test_linux_net_fallback_without_netphys():
+    """无 @@netphys 段(容器内拿不到硬件口)时保持老口径:除 lo 外全量求和。"""
+    text = LINUX_SAMPLE.replace(
+        "  eth0: 1000000 100 0 0 0 0 0 0 2000000 200 0 0 0 0 0 0\n",
+        "  eth0: 1000000 100 0 0 0 0 0 0 2000000 200 0 0 0 0 0 0\n"
+        " veth123: 500 5 0 0 0 0 0 0 500 5 0 0 0 0 0 0\n",
+    )
+    r = parse_linux_metrics(text)
+    assert r["net_rx_bytes"] == 1000500
+    assert r["net_tx_bytes"] == 2000500
+
+
 WINDOWS_SAMPLE = """cpu_pct=23
 mem_total_mb=16384
 mem_free_mb=8192
