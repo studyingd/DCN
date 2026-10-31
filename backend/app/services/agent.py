@@ -82,6 +82,7 @@ from app.services.agent_types import (  # noqa: F401
     AgentError,
     AgentTarget,
     get_agent_config,
+    session_retry,
 )
 from app.services.settings import get_setting
 from app.validators import validate_outbound_url
@@ -908,27 +909,34 @@ def _container_snapshot_evidence(db: Session, device, max_age: int = 180) -> str
     from app.models.pve_guest_binding import PveGuestBinding
 
     if getattr(device, "id", None):
-        rows = (
-            db.query(DeviceContainer)
-            .filter(DeviceContainer.device_id == device.id)
-            .all()
-        )
-    else:
-        binding = (
-            db.query(PveGuestBinding)
-            .filter(
-                PveGuestBinding.ip_address == device.ip_address,
-                PveGuestBinding.enabled == 1,
+
+        def _load_rows():
+            return (
+                db.query(DeviceContainer)
+                .filter(DeviceContainer.device_id == device.id)
+                .all()
             )
-            .first()
-        )
-        if binding is None:
-            return None
-        rows = (
-            db.query(DeviceContainer)
-            .filter(DeviceContainer.pve_guest_binding_id == binding.id)
-            .all()
-        )
+    else:
+
+        def _load_rows():
+            binding = (
+                db.query(PveGuestBinding)
+                .filter(
+                    PveGuestBinding.ip_address == device.ip_address,
+                    PveGuestBinding.enabled == 1,
+                )
+                .first()
+            )
+            if binding is None:
+                return []
+            return (
+                db.query(DeviceContainer)
+                .filter(DeviceContainer.pve_guest_binding_id == binding.id)
+                .all()
+            )
+
+    # 长会话可能已横跨多轮 LLM/SSH 空闲期,连接被服务端抬掉时自愈重试
+    rows = session_retry(db, _load_rows)
     if not rows:
         return None
     stamps = [r.updated_at for r in rows if r.updated_at]

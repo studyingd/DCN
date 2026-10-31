@@ -19,6 +19,7 @@ from app.database import SessionLocal
 from app.models.agent_action_approval import AgentActionApproval
 from app.services import agent_actions, agent_primitives
 from app.services.agent_exec import _diagnostic_output
+from app.services.agent_types import session_retry
 
 logger = logging.getLogger(__name__)
 
@@ -174,9 +175,14 @@ def _dispatch_run_action(
         requested_at=now,
         expires_at=now + timedelta(seconds=_agent.AGENT_ACTION_APPROVAL_TIMEOUT),
     )
-    db.add(approval)
-    db.commit()
-    db.refresh(approval)
+
+    def _insert_pending():
+        db.add(approval)
+        db.commit()
+        db.refresh(approval)
+
+    # 提议前可能刚经历多轮 LLM/SSH 空闲,长会话连接被服务端抬掉时自愈重试
+    session_retry(db, _insert_pending)
 
     event = threading.Event()
     with _approval_events_lock:
@@ -229,20 +235,31 @@ def _dispatch_run_action(
                 exit_code, text = _run_action_exec(
                     db, device, row.command, action["timeout"], session
                 )
-                _audit_container_action(db, device, key, params, exit_code, row.command)
+
+                def _audit():
+                    _audit_container_action(
+                        db, device, key, params, exit_code, row.command
+                    )
+
+                session_retry(db, _audit)
                 final = "executed" if exit_code == 0 else "execution_failed"
             except Exception as exc:
                 text, final = str(exc)[:300], "execution_failed"
-            db.query(AgentActionApproval).filter(
-                AgentActionApproval.id == approval.id
-            ).update(
-                {
-                    "status": final,
-                    "output": text[:8000],
-                    "executed_at": datetime.now(timezone.utc),
-                }
-            )
-            db.commit()
+
+            def _finalize_approval():
+                db.query(AgentActionApproval).filter(
+                    AgentActionApproval.id == approval.id
+                ).update(
+                    {
+                        "status": final,
+                        "output": text[:8000],
+                        "executed_at": datetime.now(timezone.utc),
+                    }
+                )
+                db.commit()
+
+            # 审批等待最长 600s,等待后连接可能已被服务端抬掉,自愈重试
+            session_retry(db, _finalize_approval)
             step.update({"final": final, "ok": exit_code == 0, "preview": text[:300]})
             payload = (
                 {"key": key, "approved": True, "exit_code": exit_code, "output": text}

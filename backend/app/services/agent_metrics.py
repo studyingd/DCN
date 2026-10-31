@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.device import Device
 from app.models.device_metric_sample import DeviceMetricSample
 from app.models.pve_guest_binding import PveGuestBinding
-from app.services.agent_types import AgentTarget
+from app.services.agent_types import AgentTarget, session_retry
 from app.services.pve_guest_status import get_guest_metric_history
 
 
@@ -32,14 +32,19 @@ def _metrics_summary(db: Session, device: Device | AgentTarget, hours: int) -> s
         return json.dumps(
             {"note": "目标无 IP,无法关联平台采集数据"}, ensure_ascii=False
         )
-    binding = (
-        db.query(PveGuestBinding)
-        .filter(
-            PveGuestBinding.ip_address == device.ip_address.strip(),
-            PveGuestBinding.enabled == 1,
+
+    def _load_binding():
+        return (
+            db.query(PveGuestBinding)
+            .filter(
+                PveGuestBinding.ip_address == device.ip_address.strip(),
+                PveGuestBinding.enabled == 1,
+            )
+            .first()
         )
-        .first()
-    )
+
+    # 长会话自愈:连接被服务端抬掉时回滚换新连接重试
+    binding = session_retry(db, _load_binding)
     if binding is None:
         return json.dumps(
             {"note": "PVE 虚拟机尚未接入平台指标采集,请使用虚拟机内诊断项取证"},
@@ -52,15 +57,19 @@ def _device_metrics_summary(db: Session, device_id: int, hours: int) -> str:
     """物理设备:DeviceMetricSample 的窗口统计。"""
     hours = min(max(hours, 1), 168)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    rows = (
-        db.query(DeviceMetricSample)
-        .filter(
-            DeviceMetricSample.device_id == device_id,
-            DeviceMetricSample.ts >= since,
+
+    def _load_rows():
+        return (
+            db.query(DeviceMetricSample)
+            .filter(
+                DeviceMetricSample.device_id == device_id,
+                DeviceMetricSample.ts >= since,
+            )
+            .order_by(DeviceMetricSample.ts)
+            .all()
         )
-        .order_by(DeviceMetricSample.ts)
-        .all()
-    )
+
+    rows = session_retry(db, _load_rows)
     if not rows:
         return json.dumps({"note": "该时间范围内无采集数据"}, ensure_ascii=False)
 

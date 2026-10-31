@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.config import (
@@ -23,6 +24,27 @@ from app.services.crypto import decrypt
 from app.services.settings import get_setting
 
 logger = logging.getLogger(__name__)
+
+
+def session_retry(db: Session, fn):
+    """诊断 run 的长持有会话自愈：连接被服务端抬掉后回滚一次换新连接重试。
+
+    诊断 run 的 DB 会话会横跨 LLM 轮次(每轮几十秒)、SSH 取证与审批等待(最长
+    ``AGENT_ACTION_APPROVAL_TIMEOUT``)，期间连接空闲；MySQL ``wait_timeout``
+    较短/服务重启/网络回收时连接被单方面断开，下次用它写库就报
+    ``pymysql.err.InterfaceError (0, '')``。连接池的 ``pool_pre_ping`` 只在
+    借出时探测，管不到已借出的会话——所以在这些中途触点上回滚后重试：
+    回滚使会话作废旧连接，下一次查询从池里拿新连接（pre_ping 兜底）。
+    连接健康时 fn 只执行一次，行为与直调完全一致。
+    """
+    try:
+        return fn()
+    except (InterfaceError, OperationalError):
+        logger.warning(
+            "agent run db connection lost, retrying once on a fresh connection"
+        )
+        db.rollback()
+        return fn()
 
 
 class AgentError(Exception):
